@@ -1,0 +1,29 @@
+# Binaries and build artifacts
+*.exe
+*.exe-e
+*.elf
+*.dylib
+*.so
+*.dll
+*.a
+*.app
+bin/
+
+# Test binaries and coverage reports
+*.test
+*.out
+*.prof
+coverage.txt
+
+# IDE / OS specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary runtime test data & secrets
+cookies*.json
+*.maFile
+*.log
