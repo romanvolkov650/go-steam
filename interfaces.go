@@ -79,6 +79,12 @@ type AccountService interface {
 	LoginWithRefreshTokenWithContext(ctx context.Context) error
 	GetAccountStatus() (*AccountStatus, error)
 	GetAccountStatusWithContext(ctx context.Context) (*AccountStatus, error)
+	GetTradeURL() (string, error)
+	GetTradeURLWithContext(ctx context.Context) (string, error)
+	GetAvatarURL() (string, error)
+	GetAvatarURLWithContext(ctx context.Context) (string, error)
+	FetchAccountDetails() (*FullAccountDetails, error)
+	FetchAccountDetailsWithContext(ctx context.Context) (*FullAccountDetails, error)
 	ExportCookies() ([]*CookieJSON, error)
 	ExportCookiesJSON() (string, error)
 	ImportCookies(cookies []*CookieJSON)

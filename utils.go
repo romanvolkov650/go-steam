@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -197,18 +196,6 @@ func (c *Client) doRequestWithRetry(ctx context.Context, req *http.Request) (*ht
 
 	if req != nil && req.URL != nil {
 		c.ensureSessionCookiesForURL(req.URL)
-		if c.Jar != nil {
-			cookiesSent := c.Jar.Cookies(req.URL)
-			var names []string
-			hasLogin := false
-			for _, ck := range cookiesSent {
-				names = append(names, ck.Name)
-				if ck.Name == "steamLoginSecure" {
-					hasLogin = true
-				}
-			}
-			log.Printf("[HTTPRequest] %s %s | Cookies sent (%d): [%s] | LoggedIn=%v", req.Method, req.URL.String(), len(cookiesSent), strings.Join(names, ", "), hasLogin)
-		}
 	}
 
 	maxRetries := 3
