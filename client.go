@@ -90,73 +90,108 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 }
 
 func (c *Client) setSessionIDCookie() {
-	cookies := []*http.Cookie{
-		{Name: "sessionid", Value: c.SessionID, Domain: "steamcommunity.com", Path: "/"},
-		{Name: "sessionid", Value: c.SessionID, Domain: "store.steampowered.com", Path: "/"},
+	if c.SessionID == "" {
+		return
 	}
-
-	c.Jar.SetCookies(steamCommunityURL, cookies)
-	c.Jar.SetCookies(steamStoreURL, cookies)
+	ck := &http.Cookie{Name: "sessionid", Value: c.SessionID, Path: "/"}
+	for _, u := range allSteamURLs {
+		c.Jar.SetCookies(u, []*http.Cookie{ck})
+	}
 }
 
-// CookieJSON is a serializable representation of an HTTP cookie for JSON export/import.
+// CookieJSON is a serializable representation of an HTTP cookie matching standard steampy / Python http.cookiejar format.
 type CookieJSON struct {
-	Name     string    `json:"name"`
-	Value    string    `json:"value"`
-	Domain   string    `json:"domain"`
-	Path     string    `json:"path"`
-	Expires  time.Time `json:"expires,omitempty"`
-	Secure   bool      `json:"secure"`
-	HttpOnly bool      `json:"http_only"`
+	Name     string                 `json:"name"`
+	Value    string                 `json:"value"`
+	Domain   string                 `json:"domain"`
+	Path     string                 `json:"path"`
+	Expires  *int64                 `json:"expires"`
+	Secure   bool                   `json:"secure"`
+	Discard  bool                   `json:"discard"`
+	HttpOnly bool                   `json:"http_only,omitempty"`
+	Rest     map[string]interface{} `json:"rest,omitempty"`
+}
+
+// UnmarshalJSON supports parsing both steampy format (int64/null expires, rest) and legacy go-steam format (ISO string expires).
+func (c *CookieJSON) UnmarshalJSON(data []byte) error {
+	type Alias CookieJSON
+	aux := &struct {
+		RawExpires interface{} `json:"expires"`
+		*Alias
+	}{
+		Alias: (*Alias)(c),
+	}
+
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	if aux.RawExpires != nil {
+		switch v := aux.RawExpires.(type) {
+		case float64:
+			t := int64(v)
+			if t > 0 {
+				c.Expires = &t
+			}
+		case string:
+			if t, err := time.Parse(time.RFC3339, v); err == nil && !t.IsZero() {
+				sec := t.Unix()
+				if sec > 0 {
+					c.Expires = &sec
+				}
+			}
+		}
+	}
+
+	if c.Rest != nil {
+		if _, ok := c.Rest["HttpOnly"]; ok {
+			c.HttpOnly = true
+		}
+	}
+
+	return nil
 }
 
 func (c *Client) SetSessionCookies(sessionID, steamLoginSecure, refreshToken string) {
 	c.mu.Lock()
 	c.SessionID = sessionID
-	c.SteamLoginSecure = steamLoginSecure
+	c.SteamLoginSecure = strings.ReplaceAll(steamLoginSecure, "%7C", "|")
 	c.LoggedIn = steamLoginSecure != ""
 	steamID := c.Config.SteamID
 	c.mu.Unlock()
 
-	cleanLoginSecure := strings.ReplaceAll(steamLoginSecure, "%7C", "|")
-	cleanRefresh := strings.ReplaceAll(refreshToken, "%7C", "|")
+	secureValue := strings.ReplaceAll(steamLoginSecure, "|", "%7C")
+	refreshValue := strings.ReplaceAll(refreshToken, "|", "%7C")
 
-	cookiesCommunity := []*http.Cookie{}
-	cookiesStore := []*http.Cookie{}
-
-	if sessionID != "" {
-		cookiesCommunity = append(cookiesCommunity, &http.Cookie{Name: "sessionid", Value: sessionID, Domain: "steamcommunity.com", Path: "/"})
-		cookiesStore = append(cookiesStore, &http.Cookie{Name: "sessionid", Value: sessionID, Domain: "store.steampowered.com", Path: "/"})
-	}
-	if steamLoginSecure != "" {
-		cookiesCommunity = append(cookiesCommunity, &http.Cookie{Name: "steamLoginSecure", Value: cleanLoginSecure, Domain: "steamcommunity.com", Path: "/", Secure: true, HttpOnly: true})
-		cookiesStore = append(cookiesStore, &http.Cookie{Name: "steamLoginSecure", Value: cleanLoginSecure, Domain: "store.steampowered.com", Path: "/", Secure: true, HttpOnly: true})
-	}
-	if refreshToken != "" {
-		refreshValue := cleanRefresh
-		if !strings.Contains(refreshValue, "||") && steamID != "" {
-			refreshValue = fmt.Sprintf("%s||%s", steamID, cleanRefresh)
+	for _, u := range allSteamURLs {
+		if sessionID != "" {
+			ck := &http.Cookie{Name: "sessionid", Value: sessionID, Path: "/"}
+			c.Jar.SetCookies(u, []*http.Cookie{ck})
 		}
-		cookiesCommunity = append(cookiesCommunity, &http.Cookie{Name: "steamRefresh_steam", Value: refreshValue, Domain: "steamcommunity.com", Path: "/", Secure: true, HttpOnly: true})
-		cookiesStore = append(cookiesStore, &http.Cookie{Name: "steamRefresh_steam", Value: refreshValue, Domain: "store.steampowered.com", Path: "/", Secure: true, HttpOnly: true})
+		if steamLoginSecure != "" {
+			ck := &http.Cookie{Name: "steamLoginSecure", Value: secureValue, Path: "/", Secure: true, HttpOnly: true}
+			c.Jar.SetCookies(u, []*http.Cookie{ck})
+		}
+		if refreshToken != "" {
+			refVal := refreshValue
+			if !strings.Contains(refVal, "%7C%7C") && !strings.Contains(refVal, "||") && steamID != "" {
+				refVal = fmt.Sprintf("%s%%7C%%7C%s", steamID, refreshValue)
+			}
+			ck := &http.Cookie{Name: "steamRefresh_steam", Value: refVal, Path: "/", Secure: true, HttpOnly: true}
+			c.Jar.SetCookies(u, []*http.Cookie{ck})
+		}
 	}
-
-	c.Jar.SetCookies(steamCommunityURL, cookiesCommunity)
-	c.Jar.SetCookies(steamStoreURL, cookiesStore)
 }
 
-// ExportCookies exports all active session cookies from the CookieJar into JSON format.
+// ExportCookies exports all active session cookies from the CookieJar into steampy compatible JSON format.
 func (c *Client) ExportCookies() ([]*CookieJSON, error) {
-	commCookies := c.Jar.Cookies(steamCommunityURL)
-	storeCookies := c.Jar.Cookies(steamStoreURL)
-
 	seen := make(map[string]bool)
 	var result []*CookieJSON
 
-	for _, ck := range append(commCookies, storeCookies...) {
+	addCookie := func(ck *http.Cookie, defaultDomain string) {
 		domain := ck.Domain
 		if domain == "" {
-			domain = "steamcommunity.com"
+			domain = defaultDomain
 		}
 		path := ck.Path
 		if path == "" {
@@ -165,20 +200,56 @@ func (c *Client) ExportCookies() ([]*CookieJSON, error) {
 
 		key := fmt.Sprintf("%s:%s:%s", domain, ck.Name, path)
 		if seen[key] {
-			continue
+			return
 		}
 		seen[key] = true
 
-		result = append(result, &CookieJSON{
+		var exp *int64
+		discard := true
+		if !ck.Expires.IsZero() && ck.Expires.Unix() > 0 {
+			unix := ck.Expires.Unix()
+			exp = &unix
+			discard = false
+		}
+
+		rest := make(map[string]interface{})
+		if ck.HttpOnly {
+			rest["HttpOnly"] = nil
+		}
+		if ck.SameSite != 0 {
+			switch ck.SameSite {
+			case http.SameSiteLaxMode:
+				rest["SameSite"] = "Lax"
+			case http.SameSiteStrictMode:
+				rest["SameSite"] = "Strict"
+			case http.SameSiteNoneMode:
+				rest["SameSite"] = "None"
+			}
+		}
+
+		ckJSON := &CookieJSON{
 			Name:     ck.Name,
 			Value:    ck.Value,
 			Domain:   domain,
 			Path:     path,
-			Expires:  ck.Expires,
+			Expires:  exp,
 			Secure:   ck.Secure,
+			Discard:  discard,
 			HttpOnly: ck.HttpOnly,
-		})
+		}
+		if len(rest) > 0 {
+			ckJSON.Rest = rest
+		}
+
+		result = append(result, ckJSON)
 	}
+
+	for _, u := range allSteamURLs {
+		for _, ck := range c.Jar.Cookies(u) {
+			addCookie(ck, u.Host)
+		}
+	}
+
 	return result, nil
 }
 
@@ -197,25 +268,9 @@ func (c *Client) ExportCookiesJSON() (string, error) {
 
 // ImportCookies loads cookies from a list of CookieJSON structures into the client's CookieJar.
 func (c *Client) ImportCookies(cookies []*CookieJSON) {
-	var commCookies []*http.Cookie
-	var storeCookies []*http.Cookie
-
 	for _, ck := range cookies {
-		path := ck.Path
-		if path == "" {
-			path = "/"
-		}
-
-		domain := strings.TrimPrefix(ck.Domain, ".")
-
-		httpCookie := &http.Cookie{
-			Name:     ck.Name,
-			Value:    ck.Value,
-			Domain:   domain,
-			Path:     path,
-			Expires:  ck.Expires,
-			Secure:   ck.Secure,
-			HttpOnly: ck.HttpOnly,
+		if ck.Name == "" || ck.Value == "" {
+			continue
 		}
 
 		if ck.Name == "sessionid" && ck.Value != "" {
@@ -224,12 +279,12 @@ func (c *Client) ImportCookies(cookies []*CookieJSON) {
 			c.mu.Unlock()
 		}
 		if ck.Name == "steamLoginSecure" && ck.Value != "" {
+			cleanVal := strings.ReplaceAll(ck.Value, "%7C", "|")
 			c.mu.Lock()
-			c.SteamLoginSecure = ck.Value
+			c.SteamLoginSecure = cleanVal
 			c.LoggedIn = true
 
 			if c.Config.SteamID == "" {
-				cleanVal := strings.ReplaceAll(ck.Value, "%7C", "|")
 				parts := strings.Split(cleanVal, "|")
 				if len(parts) > 0 && len(parts[0]) == 17 {
 					c.Config.SteamID = parts[0]
@@ -238,18 +293,55 @@ func (c *Client) ImportCookies(cookies []*CookieJSON) {
 			c.mu.Unlock()
 		}
 
-		if strings.Contains(ck.Domain, "steamcommunity.com") {
-			commCookies = append(commCookies, httpCookie)
-		} else if strings.Contains(ck.Domain, "steampowered.com") {
-			storeCookies = append(storeCookies, httpCookie)
+		val := ck.Value
+		if ck.Name == "steamLoginSecure" || ck.Name == "steamRefresh_steam" {
+			val = strings.ReplaceAll(val, "|", "%7C")
+		}
+
+		var expTime time.Time
+		if ck.Expires != nil && *ck.Expires > 0 {
+			expTime = time.Unix(*ck.Expires, 0)
+		}
+
+		isHttpOnly := ck.HttpOnly
+		if ck.Rest != nil {
+			if _, ok := ck.Rest["HttpOnly"]; ok {
+				isHttpOnly = true
+			}
+		}
+
+		// Force Path: "/" for all session cookies to match all URL paths (dynamic/userwallet, market, account, etc.)
+		httpCookie := &http.Cookie{
+			Name:     ck.Name,
+			Value:    val,
+			Path:     "/",
+			Expires:  expTime,
+			Secure:   ck.Secure,
+			HttpOnly: isHttpOnly,
+		}
+
+		// Main session cookies (steamLoginSecure, sessionid, steamRefresh_steam) apply to ALL Steam domains
+		if ck.Name == "sessionid" || ck.Name == "steamLoginSecure" || ck.Name == "steamRefresh_steam" {
+			for _, u := range allSteamURLs {
+				c.Jar.SetCookies(u, []*http.Cookie{httpCookie})
+			}
 		} else {
-			commCookies = append(commCookies, httpCookie)
-			storeCookies = append(storeCookies, httpCookie)
+			domainLower := strings.ToLower(ck.Domain)
+			if strings.Contains(domainLower, "steamcommunity.com") {
+				c.Jar.SetCookies(steamCommunityURL, []*http.Cookie{httpCookie})
+			} else if strings.Contains(domainLower, "steampowered.com") {
+				c.Jar.SetCookies(steamStoreURL, []*http.Cookie{httpCookie})
+				c.Jar.SetCookies(steamLoginURL, []*http.Cookie{httpCookie})
+				c.Jar.SetCookies(steamAPIURL, []*http.Cookie{httpCookie})
+				c.Jar.SetCookies(steamCheckoutURL, []*http.Cookie{httpCookie})
+				c.Jar.SetCookies(steamHelpURL, []*http.Cookie{httpCookie})
+			} else {
+				for _, u := range allSteamURLs {
+					c.Jar.SetCookies(u, []*http.Cookie{httpCookie})
+				}
+			}
 		}
 	}
-
-	c.Jar.SetCookies(steamCommunityURL, commCookies)
-	c.Jar.SetCookies(steamStoreURL, storeCookies)
 }
 
 // ImportCookiesJSON loads cookies from a JSON formatted string.
@@ -346,7 +438,7 @@ func (c *Client) LoginWithRefreshTokenWithContext(ctx context.Context) error {
 			c.mu.Unlock()
 		}
 
-		// Perform /login/settoken transfer for each domain (store, community, help, checkout)
+		// Perform /login/settoken transfer for each domain (store, community, help, checkout) with retries
 		for _, info := range finResult.TransferInfo {
 			if info.URL == "" {
 				continue
@@ -357,14 +449,23 @@ func (c *Client) LoginWithRefreshTokenWithContext(ctx context.Context) error {
 			}
 			tData.Set("steamID", steamID)
 
-			tReq, err := c.newAjaxPostRequestWithContext(ctx, info.URL, tData, "https://steamcommunity.com/")
-			if err == nil {
-				tResp, err := c.HTTPClient.Do(tReq)
+			for attempt := 0; attempt < 3; attempt++ {
+				tReq, err := c.newAjaxPostRequestWithContext(ctx, info.URL, tData, "https://steamcommunity.com/")
+				if err != nil {
+					continue
+				}
+				tResp, err := c.doRequestWithRetry(ctx, tReq)
 				if err == nil {
 					tResp.Body.Close()
+					break
 				}
+				time.Sleep(300 * time.Millisecond)
 			}
 		}
+
+		// Ensure essential session cookies (steamLoginSecure, sessionid) exist for steamcommunity.com
+		c.ensureSessionCookiesForURL(steamCommunityURL)
+
 		c.mu.Lock()
 		c.LoggedIn = true
 		c.mu.Unlock()
@@ -403,18 +504,23 @@ func (c *Client) LoginWithContext(ctx context.Context) error {
 
 	var clientID, requestID, steamID string
 	var lastBeginBody []byte
+	var lastErr error
 
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
+				if lastErr != nil {
+					return fmt.Errorf("%w (auth detail: %v)", ctx.Err(), lastErr)
+				}
 				return ctx.Err()
-			case <-time.After(3 * time.Second):
+			case <-time.After(1 * time.Second):
 			}
 		}
 
 		mod, exp, ts, err := c.fetchRSAPublicKeyWithContext(ctx, username)
 		if err != nil {
+			lastErr = fmt.Errorf("fetch RSA key error: %w", err)
 			continue
 		}
 
@@ -422,9 +528,17 @@ func (c *Client) LoginWithContext(ctx context.Context) error {
 		if err == nil && clientID != "" {
 			break
 		}
+		if err != nil {
+			lastErr = fmt.Errorf("begin auth session error: %w", err)
+		} else if len(lastBeginBody) > 0 {
+			lastErr = fmt.Errorf("begin auth session failed: %s", string(lastBeginBody))
+		}
 	}
 
 	if clientID == "" {
+		if lastErr != nil {
+			return lastErr
+		}
 		return fmt.Errorf("begin auth session failed: %s", string(lastBeginBody))
 	}
 
@@ -580,29 +694,50 @@ func (c *Client) pollAuthSessionStatusWithContext(ctx context.Context, clientID,
 		} `json:"response"`
 	}
 
+	var lastPollErr error
+	var lastPollBody string
+
 	for attempt := 0; attempt < 5; attempt++ {
 		select {
 		case <-ctx.Done():
+			if lastPollErr != nil {
+				return "", "", fmt.Errorf("%w (poll error: %v)", ctx.Err(), lastPollErr)
+			}
 			return "", "", ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 		}
 
 		pollReq, err := c.newAjaxPostRequestWithContext(ctx, "https://api.steampowered.com/IAuthenticationService/PollAuthSessionStatus/v1/", pollData, "https://steamcommunity.com/")
 		if err != nil {
+			lastPollErr = err
 			continue
 		}
 
 		pollResp, err := c.doRequestWithRetry(ctx, pollReq)
 		if err != nil {
+			lastPollErr = err
 			continue
 		}
 
 		pollBody, readErr := io.ReadAll(pollResp.Body)
 		pollResp.Body.Close()
 
-		if readErr == nil && json.Unmarshal(pollBody, &pollResult) == nil && pollResult.Response.RefreshToken != "" {
+		if readErr != nil {
+			lastPollErr = readErr
+			continue
+		}
+
+		lastPollBody = string(pollBody)
+		if json.Unmarshal(pollBody, &pollResult) == nil && pollResult.Response.RefreshToken != "" {
 			return pollResult.Response.RefreshToken, pollResult.Response.AccessToken, nil
 		}
+		if len(lastPollBody) > 0 {
+			lastPollErr = fmt.Errorf("poll auth status response: %s", lastPollBody)
+		}
+	}
+
+	if lastPollErr != nil {
+		return "", "", fmt.Errorf("poll auth status failed: %w", lastPollErr)
 	}
 
 	return "", "", fmt.Errorf("poll auth status timed out / failed")

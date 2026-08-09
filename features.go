@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -27,6 +28,15 @@ type AccountStatus struct {
 	ErrorMessage   string `json:"error_message,omitempty"`
 }
 
+// FullAccountDetails holds aggregated balance, avatar, and trade URL data for an account.
+type FullAccountDetails struct {
+	SteamID       string `json:"steam_id"`
+	WalletBalance string `json:"wallet_balance"`
+	TradeURL      string `json:"trade_url"`
+	AvatarURL     string `json:"avatar_url"`
+	LastUpdated   int64  `json:"last_updated"`
+}
+
 // Confirmation represents a pending 2FA Mobile Confirmation (trade / market listing).
 type Confirmation struct {
 	ID        string `json:"id"`
@@ -43,7 +53,7 @@ func (c *Client) GetAccountStatus() (*AccountStatus, error) {
 	return c.GetAccountStatusWithContext(context.Background())
 }
 
-// GetAccountStatusWithContext fetches wallet balance and inventory item counts for CS2, Dota 2, TF2 with context support.
+// GetAccountStatusWithContext fetches wallet balance with context support.
 func (c *Client) GetAccountStatusWithContext(ctx context.Context) (*AccountStatus, error) {
 	c.mu.RLock()
 	steamID := c.Config.SteamID
@@ -54,31 +64,12 @@ func (c *Client) GetAccountStatusWithContext(ctx context.Context) (*AccountStatu
 		LastUpdated: time.Now().Unix(),
 	}
 
-	// 1. Fetch Wallet Balance
+	// Fetch Wallet Balance
 	balance, err := c.fetchWalletBalanceWithContext(ctx)
 	if err == nil && balance != "" {
 		status.WalletBalance = balance
 	} else {
 		status.WalletBalance = "0.00"
-	}
-
-	// 2. Fetch inventory counts for CS2 (730), Dota2 (570), TF2 (440)
-	if steamID != "" {
-		status.CS2Count = c.fetchInventoryItemCountWithContext(ctx, "730", "2")
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(300 * time.Millisecond):
-		}
-
-		status.Dota2Count = c.fetchInventoryItemCountWithContext(ctx, "570", "2")
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(300 * time.Millisecond):
-		}
-
-		status.TF2Count = c.fetchInventoryItemCountWithContext(ctx, "440", "2")
 	}
 
 	return status, nil
@@ -88,8 +79,119 @@ func (c *Client) fetchWalletBalance() (string, error) {
 	return c.fetchWalletBalanceWithContext(context.Background())
 }
 
+func getCurrencySymbol(currencyID int) string {
+	switch currencyID {
+	case 1:
+		return "$"
+	case 2:
+		return "£"
+	case 3:
+		return "€"
+	case 5:
+		return "₽"
+	case 18:
+		return "₴"
+	case 37:
+		return "₸"
+	case 23:
+		return "¥"
+	case 17:
+		return "TL"
+	case 34:
+		return "ARS$"
+	case 7:
+		return "R$"
+	case 8:
+		return "¥"
+	case 20:
+		return "CDN$"
+	case 21:
+		return "A$"
+	default:
+		return ""
+	}
+}
+
+func extractBalanceFromHTML(bodyStr string) string {
+	// 1. Direct Regex for "wallet_balance": 1456 / "wallet_balance": "1456"
+	reBalDirect := regexp.MustCompile(`(?i)"wallet_balance"\s*:\s*"?(\d+)"?`)
+	reCurrDirect := regexp.MustCompile(`(?i)"wallet_currency"\s*:\s*(\d+)`)
+
+	if mBal := reBalDirect.FindStringSubmatch(bodyStr); len(mBal) > 1 {
+		rawAmount, err := strconv.ParseFloat(mBal[1], 64)
+		if err == nil {
+			amountStr := fmt.Sprintf("%.2f", rawAmount/100.0)
+			currencyID := 0
+			if mCurr := reCurrDirect.FindStringSubmatch(bodyStr); len(mCurr) > 1 {
+				currencyID, _ = strconv.Atoi(mCurr[1])
+			}
+			sym := getCurrencySymbol(currencyID)
+			if sym != "" {
+				return fmt.Sprintf("%s %s", amountStr, sym)
+			}
+			return amountStr
+		}
+	}
+
+	// 2. HTML Tag Regex for header_wallet_balance or account_balance
+	reTag := regexp.MustCompile(`(?i)(?:id="header_wallet_balance"|class="[^"]*account_balance[^"]*")[^>]*>([\s\S]*?)</`)
+	if m := reTag.FindStringSubmatch(bodyStr); len(m) > 1 {
+		stripHTML := regexp.MustCompile(`<[^>]*>`)
+		cleanText := strings.TrimSpace(stripHTML.ReplaceAllString(m[1], ""))
+		if cleanText != "" {
+			return cleanText
+		}
+	}
+
+	return ""
+}
+
 func (c *Client) fetchWalletBalanceWithContext(ctx context.Context) (string, error) {
-	// 1. Query steamcommunity.com/market/ to extract g_rgWalletInfo (contains wallet_currency and balance)
+	log.Printf("[BalanceFetch] [%s] Starting wallet balance fetch...", c.Config.Username)
+
+	// 1. Query store.steampowered.com/account/
+	reqAccount, err := c.newRequestWithContext(ctx, "GET", "https://store.steampowered.com/account/", nil, "https://store.steampowered.com/")
+	if err == nil {
+		reqAccount.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		respAccount, err := c.doRequestWithRetry(ctx, reqAccount)
+		if err == nil {
+			bodyBytes, _ := io.ReadAll(respAccount.Body)
+			respAccount.Body.Close()
+			bodyStr := string(bodyBytes)
+
+			if idx := strings.Index(bodyStr, "header_wallet_balance"); idx != -1 {
+				start := idx - 50
+				if start < 0 {
+					start = 0
+				}
+				end := idx + 150
+				if end > len(bodyStr) {
+					end = len(bodyStr)
+				}
+				log.Printf("[BalanceFetch] [%s] header_wallet_balance context in store/account: %s", c.Config.Username, bodyStr[start:end])
+			}
+			if idx := strings.Index(bodyStr, "account_balance"); idx != -1 {
+				start := idx - 50
+				if start < 0 {
+					start = 0
+				}
+				end := idx + 150
+				if end > len(bodyStr) {
+					end = len(bodyStr)
+				}
+				log.Printf("[BalanceFetch] [%s] account_balance context in store/account: %s", c.Config.Username, bodyStr[start:end])
+			}
+
+			if val := extractBalanceFromHTML(bodyStr); val != "" {
+				log.Printf("[BalanceFetch] [%s] Found balance in store/account page: %s", c.Config.Username, val)
+				return val, nil
+			}
+		} else {
+			log.Printf("[BalanceFetch] [%s] store/account HTTP error: %v", c.Config.Username, err)
+		}
+	}
+
+	// 2. Query steamcommunity.com/market/
 	reqMarket, err := c.newRequestWithContext(ctx, "GET", "https://steamcommunity.com/market/", nil, "https://steamcommunity.com/")
 	if err == nil {
 		reqMarket.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -101,70 +203,39 @@ func (c *Client) fetchWalletBalanceWithContext(ctx context.Context) (string, err
 			respMarket.Body.Close()
 			bodyStr := string(bodyBytes)
 
-			// Search for g_rgWalletInfo = {...};
-			reWallet := regexp.MustCompile(`(?s)g_rgWalletInfo\s*=\s*(\{.*?\});`)
-			matches := reWallet.FindStringSubmatch(bodyStr)
-			if len(matches) > 1 {
-				var walletInfo struct {
-					WalletBalance  interface{} `json:"wallet_balance"`
-					WalletCurrency int         `json:"wallet_currency"`
+			if idx := strings.Index(bodyStr, "header_wallet_balance"); idx != -1 {
+				start := idx - 50
+				if start < 0 {
+					start = 0
 				}
-				if err := json.Unmarshal([]byte(matches[1]), &walletInfo); err == nil {
-					if walletInfo.WalletCurrency > 0 {
-						c.mu.Lock()
-						c.WalletCurrency = walletInfo.WalletCurrency
-						c.mu.Unlock()
-					}
-					if walletInfo.WalletBalance != nil {
-						var rawAmount float64
-						switch v := walletInfo.WalletBalance.(type) {
-						case float64:
-							rawAmount = v
-						case string:
-							rawAmount, _ = strconv.ParseFloat(v, 64)
-						}
-						return fmt.Sprintf("%.2f", rawAmount/100.0), nil
-					}
+				end := idx + 150
+				if end > len(bodyStr) {
+					end = len(bodyStr)
 				}
+				log.Printf("[BalanceFetch] [%s] header_wallet_balance context in market: %s", c.Config.Username, bodyStr[start:end])
+			}
+			if idx := strings.Index(bodyStr, "g_rgWalletInfo"); idx != -1 {
+				start := idx - 50
+				if start < 0 {
+					start = 0
+				}
+				end := idx + 200
+				if end > len(bodyStr) {
+					end = len(bodyStr)
+				}
+				log.Printf("[BalanceFetch] [%s] g_rgWalletInfo context in market: %s", c.Config.Username, bodyStr[start:end])
 			}
 
-			// Header balance fallback on market page
-			reHeader := regexp.MustCompile(`id="header_wallet_balance"[^>]*>\s*([^<]+)\s*`)
-			if m := reHeader.FindStringSubmatch(bodyStr); len(m) > 1 {
-				val := strings.TrimSpace(m[1])
-				if val != "" {
-					return val, nil
-				}
+			if val := extractBalanceFromHTML(bodyStr); val != "" {
+				log.Printf("[BalanceFetch] [%s] Found balance in market page: %s", c.Config.Username, val)
+				return val, nil
 			}
+		} else {
+			log.Printf("[BalanceFetch] [%s] Market page HTTP error: %v", c.Config.Username, err)
 		}
 	}
 
-	// 2. Fallback store.steampowered.com
-	reqStore, err := c.newRequestWithContext(ctx, "GET", "https://store.steampowered.com/", nil, "https://steamcommunity.com/")
-	if err != nil {
-		return "", err
-	}
-	reqStore.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	reqStore.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
-	respStore, err := c.doRequestWithRetry(ctx, reqStore)
-	if err != nil {
-		return "", err
-	}
-	defer respStore.Body.Close()
-
-	bodyBytes, err := io.ReadAll(respStore.Body)
-	if err != nil {
-		return "", err
-	}
-
-	bodyStr := string(bodyBytes)
-
-	reHeader := regexp.MustCompile(`id="header_wallet_balance"[^>]*>\s*([^<]+)\s*`)
-	if m := reHeader.FindStringSubmatch(bodyStr); len(m) > 1 {
-		return strings.TrimSpace(m[1]), nil
-	}
-
+	log.Printf("[BalanceFetch] [%s] Balance not found across all endpoints, returning 0.00", c.Config.Username)
 	return "0.00", nil
 }
 
@@ -412,3 +483,148 @@ func (c *Client) SendConfirmationActionWithContext(ctx context.Context, conf *Co
 
 	return fmt.Errorf("confirmation action '%s' failed: %s", action, string(bodyBytes))
 }
+
+// GetTradeURL fetches the account's own Steam Trade Offer URL.
+func (c *Client) GetTradeURL() (string, error) {
+	return c.GetTradeURLWithContext(context.Background())
+}
+
+// GetTradeURLWithContext fetches the account's own Steam Trade Offer URL with context support.
+func (c *Client) GetTradeURLWithContext(ctx context.Context) (string, error) {
+	c.mu.RLock()
+	steamID := c.Config.SteamID
+	c.mu.RUnlock()
+
+	reqURL := "https://steamcommunity.com/my/tradeoffers/privacy"
+	if steamID != "" {
+		reqURL = fmt.Sprintf("https://steamcommunity.com/profiles/%s/tradeoffers/privacy", steamID)
+	}
+
+	req, err := c.newRequestWithContext(ctx, "GET", reqURL, nil, "https://steamcommunity.com/")
+	if err != nil {
+		return "", err
+	}
+	c.ensureSessionCookiesForURL(req.URL)
+	resp, err := c.doRequestWithRetry(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	bodyStr := string(bodyBytes)
+	reTradeURL := regexp.MustCompile(`id="trade_offer_access_url"[^>]*value="([^"]+)"`)
+	matches := reTradeURL.FindStringSubmatch(bodyStr)
+	if len(matches) > 1 {
+		return strings.TrimSpace(matches[1]), nil
+	}
+
+	reTradeURLAlt := regexp.MustCompile(`https://steamcommunity\.com/tradeoffer/new/\?partner=\d+(?:&amp;|&)token=[a-zA-Z0-9_-]+`)
+	if m := reTradeURLAlt.FindString(bodyStr); m != "" {
+		return strings.ReplaceAll(m, "&amp;", "&"), nil
+	}
+
+	// Additional pattern check for inputs or JS variables
+	reTradeURLValue := regexp.MustCompile(`https:\\?/\\?/steamcommunity\.com\\?/tradeoffer\\?/new\\?/\?partner=\d+[^"'\s<]+`)
+	if m := reTradeURLValue.FindString(bodyStr); m != "" {
+		clean := strings.ReplaceAll(m, `\/`, "/")
+		clean = strings.ReplaceAll(clean, "&amp;", "&")
+		return clean, nil
+	}
+
+	if idx := strings.Index(bodyStr, "trade_offer_access_url"); idx != -1 {
+		start := idx - 50
+		if start < 0 { start = 0 }
+		end := idx + 200
+		if end > len(bodyStr) { end = len(bodyStr) }
+		log.Printf("[GetTradeURL] [%s] Found trade_offer_access_url snippet: %s", c.Config.Username, bodyStr[start:end])
+	} else {
+		sample := bodyStr
+		if len(sample) > 500 {
+			sample = sample[:500]
+		}
+		log.Printf("[GetTradeURL] [%s] trade_offer_access_url not found. Page head: %s", c.Config.Username, sample)
+	}
+
+	return "", fmt.Errorf("trade offer URL not found")
+}
+
+// GetAvatarURL fetches the account's profile avatar image URL.
+func (c *Client) GetAvatarURL() (string, error) {
+	return c.GetAvatarURLWithContext(context.Background())
+}
+
+// GetAvatarURLWithContext fetches the account's profile avatar image URL directly from playerAvatarAutoSizeInner HTML header block with context support.
+func (c *Client) GetAvatarURLWithContext(ctx context.Context) (string, error) {
+	c.mu.RLock()
+	steamID := c.Config.SteamID
+	c.mu.RUnlock()
+
+	profileURL := "https://steamcommunity.com/my/profile"
+	if steamID != "" {
+		profileURL = fmt.Sprintf("https://steamcommunity.com/profiles/%s", steamID)
+	}
+
+	req, err := c.newRequestWithContext(ctx, "GET", profileURL, nil, "https://steamcommunity.com/")
+	if err != nil {
+		return "", err
+	}
+	c.ensureSessionCookiesForURL(req.URL)
+	resp, err := c.doRequestWithRetry(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	bodyStr := string(bodyBytes)
+
+	// Target profile avatar block (playerAvatarAutoSizeInner / playerAvatarHeading)
+	reAvatarInner := regexp.MustCompile(`(?s)class=["'][^"']*(?:playerAvatarAutoSizeInner|playerAvatarHeading)[^"']*["'][^>]*>.*?<(?:img|source)[^>]+(?:src|srcset)=["'](https://[^"'\s>]+)["']`)
+	if matches := reAvatarInner.FindStringSubmatch(bodyStr); len(matches) > 1 {
+		log.Printf("[GetAvatarURL] [%s] Extracted avatar from playerAvatarAutoSizeInner: %s", c.Config.Username, matches[1])
+		return matches[1], nil
+	}
+
+	// Secondary check inside playerAvatarAutoSizeInner block for any img src
+	reInnerImg := regexp.MustCompile(`(?s)class=["'][^"']*playerAvatarAutoSizeInner[^"']*["'][^>]*>.*?<img[^>]+src=["'](https://[^"'\s>]+)["']`)
+	if matches := reInnerImg.FindStringSubmatch(bodyStr); len(matches) > 1 {
+		log.Printf("[GetAvatarURL] [%s] Extracted avatar img from playerAvatarAutoSizeInner: %s", c.Config.Username, matches[1])
+		return matches[1], nil
+	}
+
+	return "", fmt.Errorf("avatar URL not found for %s in profile header", c.Config.Username)
+}
+
+// FetchAccountDetailsWithContext aggregates wallet balance, trade URL, and avatar URL in a single context-aware call.
+func (c *Client) FetchAccountDetailsWithContext(ctx context.Context) (*FullAccountDetails, error) {
+	status, err := c.GetAccountStatusWithContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	details := &FullAccountDetails{
+		SteamID:       status.SteamID,
+		WalletBalance: status.WalletBalance,
+		LastUpdated:   time.Now().Unix(),
+	}
+
+	if tradeURL, err := c.GetTradeURLWithContext(ctx); err == nil {
+		details.TradeURL = tradeURL
+	}
+
+	if avatarURL, err := c.GetAvatarURLWithContext(ctx); err == nil {
+		details.AvatarURL = avatarURL
+	}
+
+	return details, nil
+}
+

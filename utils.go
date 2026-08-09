@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -19,6 +20,21 @@ import (
 var (
 	steamCommunityURL, _ = url.Parse("https://steamcommunity.com")
 	steamStoreURL, _     = url.Parse("https://store.steampowered.com")
+	steamLoginURL, _     = url.Parse("https://login.steampowered.com")
+	steamAPIURL, _       = url.Parse("https://api.steampowered.com")
+	steamCheckoutURL, _  = url.Parse("https://checkout.steampowered.com")
+	steamHelpURL, _      = url.Parse("https://help.steampowered.com")
+	steamTVURL, _        = url.Parse("https://steam.tv")
+
+	allSteamURLs = []*url.URL{
+		steamCommunityURL,
+		steamStoreURL,
+		steamLoginURL,
+		steamAPIURL,
+		steamCheckoutURL,
+		steamHelpURL,
+		steamTVURL,
+	}
 )
 
 // FlexibleBool unmarshals JSON booleans from boolean (true/false) or numeric (1/0) values.
@@ -179,6 +195,22 @@ func (c *Client) doRequestWithRetry(ctx context.Context, req *http.Request) (*ht
 		ctx = context.Background()
 	}
 
+	if req != nil && req.URL != nil {
+		c.ensureSessionCookiesForURL(req.URL)
+		if c.Jar != nil {
+			cookiesSent := c.Jar.Cookies(req.URL)
+			var names []string
+			hasLogin := false
+			for _, ck := range cookiesSent {
+				names = append(names, ck.Name)
+				if ck.Name == "steamLoginSecure" {
+					hasLogin = true
+				}
+			}
+			log.Printf("[HTTPRequest] %s %s | Cookies sent (%d): [%s] | LoggedIn=%v", req.Method, req.URL.String(), len(cookiesSent), strings.Join(names, ", "), hasLogin)
+		}
+	}
+
 	maxRetries := 3
 	backoff := 500 * time.Millisecond
 
@@ -215,6 +247,41 @@ func (c *Client) doRequestWithRetry(ctx context.Context, req *http.Request) (*ht
 	}
 
 	return nil, fmt.Errorf("request failed after retries")
+}
+
+func (c *Client) ensureSessionCookiesForURL(u *url.URL) {
+	if u == nil || c.Jar == nil {
+		return
+	}
+	c.mu.RLock()
+	sessionID := c.SessionID
+	steamLoginSecure := c.SteamLoginSecure
+	c.mu.RUnlock()
+
+	if sessionID == "" && steamLoginSecure == "" {
+		return
+	}
+
+	cookies := c.Jar.Cookies(u)
+	hasSessionID := false
+	hasSteamLogin := false
+
+	for _, ck := range cookies {
+		if ck.Name == "sessionid" && ck.Value != "" {
+			hasSessionID = true
+		}
+		if ck.Name == "steamLoginSecure" && ck.Value != "" {
+			hasSteamLogin = true
+		}
+	}
+
+	if !hasSessionID && sessionID != "" {
+		c.Jar.SetCookies(u, []*http.Cookie{{Name: "sessionid", Value: sessionID, Path: "/"}})
+	}
+	if !hasSteamLogin && steamLoginSecure != "" {
+		secVal := strings.ReplaceAll(steamLoginSecure, "|", "%7C")
+		c.Jar.SetCookies(u, []*http.Cookie{{Name: "steamLoginSecure", Value: secVal, Path: "/", Secure: true, HttpOnly: true}})
+	}
 }
 
 // approveConfirmationForID polls confirmations and approves the confirmation matching targetID.
