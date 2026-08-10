@@ -23,6 +23,9 @@ var (
 
 	// ErrSessionExpired is returned when session cookies are invalid or expired.
 	ErrSessionExpired = errors.New("steam: session expired or invalid cookies")
+
+	// ErrNewDeviceTradeCooldown is returned when the account is trade banned/restricted for 7 days due to logging in from a new device.
+	ErrNewDeviceTradeCooldown = errors.New("steam: account has logged in a new device and cannot trade for 7 days")
 )
 
 // SteamAPIError represents a structured error returned by Steam HTTP endpoints.

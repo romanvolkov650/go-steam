@@ -764,8 +764,14 @@ func (c *Client) LogoutWithContext(ctx context.Context) error {
 	}
 
 	c.mu.Lock()
+	c.SessionID = ""
+	c.SteamLoginSecure = ""
 	c.LoggedIn = false
 	c.mu.Unlock()
+
+	if c.Jar != nil {
+		c.Jar.ClearAuthCookies()
+	}
 
 	return nil
 }

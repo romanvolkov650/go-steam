@@ -567,7 +567,7 @@ func (c *Client) GetTradeOfferWithContext(ctx context.Context, tradeOfferID stri
 	bodyStr := string(bodyBytes)
 
 	if strings.Contains(bodyStr, "You have logged in from a new device. In order to protect the items") {
-		return nil, fmt.Errorf("Account has logged in a new device and can't trade for 7 days")
+		return nil, ErrNewDeviceTradeCooldown
 	}
 
 	// Extract partner Steam ID (User.steamid / partner_steamid / g_ulTradePartnerSteamID)

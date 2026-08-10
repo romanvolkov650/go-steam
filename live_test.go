@@ -29,7 +29,18 @@ func TestLiveAccount(t *testing.T) {
 		t.Fatalf("Ошибка создания клиента: %v", err)
 	}
 
-	if password != "" {
+	cookiesFile := "cookies_steamuhd.json"
+	loaded := false
+	if _, statErr := os.Stat(cookiesFile); statErr == nil {
+		if loadErr := client.LoadCookiesFromFile(cookiesFile); loadErr == nil {
+			if alive, _ := client.IsSessionAlive(); alive {
+				t.Log("Успешно загружены куки, сессия жива. Пропускаем Login по паролю.")
+				loaded = true
+			}
+		}
+	}
+
+	if !loaded && password != "" {
 		if err := client.Login(); err != nil {
 			t.Fatalf("Ошибка входа: %v", err)
 		}

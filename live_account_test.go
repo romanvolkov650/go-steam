@@ -68,12 +68,25 @@ func TestLiveAccountSessionAndFeatures(t *testing.T) {
 
 	ctx := context.Background()
 
-	t.Logf("Logging in for %s (SteamID: %s)...", cfg.Username, cfg.SteamID)
-	err = client.LoginWithContext(ctx)
-	if err != nil {
-		t.Fatalf("Login failed for %s: %v", cfg.Username, err)
+	cookiesFile := "cookies_steamuhd.json"
+	loaded := false
+	if _, statErr := os.Stat(cookiesFile); statErr == nil {
+		if loadErr := client.LoadCookiesFromFile(cookiesFile); loadErr == nil {
+			if alive, _ := client.IsSessionAliveWithContext(ctx); alive {
+				t.Log("Successfully loaded cookies, session is alive. Skipping credentials login.")
+				loaded = true
+			}
+		}
 	}
-	t.Logf("Login SUCCESS! LoggedIn=%v, SteamID=%s, SessionID=%s", client.LoggedIn, client.Config.SteamID, client.SessionID)
+
+	if !loaded {
+		t.Logf("Logging in for %s (SteamID: %s)...", cfg.Username, cfg.SteamID)
+		err = client.LoginWithContext(ctx)
+		if err != nil {
+			t.Fatalf("Login failed for %s: %v", cfg.Username, err)
+		}
+		t.Logf("Login SUCCESS! LoggedIn=%v, SteamID=%s, SessionID=%s", client.LoggedIn, client.Config.SteamID, client.SessionID)
+	}
 
 	// 1. Get Trade Offer URL
 	tradeURL, err := client.GetTradeURLWithContext(ctx)
@@ -98,7 +111,7 @@ func TestLiveAccountSessionAndFeatures(t *testing.T) {
 	t.Logf(">>> Account Details: TradeURL='%s', AvatarURL='%s' <<<", details.TradeURL, details.AvatarURL)
 
 	// 4. Save cookies to file
-	cookiesFile := filepath.Join(os.TempDir(), "live_account_cookies.json")
+	cookiesFile = filepath.Join(os.TempDir(), "live_account_cookies.json")
 	if err := client.SaveCookiesToFile(cookiesFile); err != nil {
 		t.Fatalf("SaveCookiesToFile failed: %v", err)
 	}
