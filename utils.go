@@ -296,20 +296,11 @@ func (c *Client) newFetchRequestWithContext(ctx context.Context, method, reqURL 
 // Cookie handling strategy:
 //   - http.Client.Jar automatically applies cookies from the jar for the request URL
 //     and stores Set-Cookie responses — this is the primary mechanism.
-//   - We manually add steamLoginSecure/sessionid only for the steamcommunity.com origin,
-//     since that is the referer origin for most Steam API calls.
-//   - We do NOT propagate sessionid across domains: each Steam subdomain receives its own
-//     sessionid via Set-Cookie from /login/settoken (as observed in browser HAR recordings).
+//   - Auth cookies are set on 2 primary domains during login and synced via syncSessionCookies().
+//   - We do NOT inject cookies on every request; the jar handles it.
 func (c *Client) doRequestWithRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
 	if ctx == nil {
 		ctx = context.Background()
-	}
-
-	// Only inject cookies for the community domain origin where we track session state.
-	// For all other domains (store, help, checkout, steam.tv) the http.Client Jar handles
-	// cookies automatically from the Set-Cookie responses of /login/settoken.
-	if req != nil && req.URL != nil {
-		c.ensureSessionCookiesForURL(req.URL)
 	}
 
 	maxRetries := 3

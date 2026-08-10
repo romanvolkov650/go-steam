@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -182,12 +183,14 @@ func (c *Client) SetSessionCookies(sessionID, steamLoginSecure, refreshToken str
 	secureValue := strings.ReplaceAll(steamLoginSecure, "|", "%7C")
 	refreshValue := strings.ReplaceAll(refreshToken, "|", "%7C")
 
-	if sessionID != "" {
-		ck := &http.Cookie{Name: "sessionid", Value: sessionID, Path: "/"}
-		c.Jar.SetCookies(steamCommunityURL, []*http.Cookie{ck})
-	}
+	// Only set auth cookies on the 2 primary domains (like steampy's STEAM_COOKIE_DOMAINS)
+	authDomains := []*url.URL{steamCommunityURL, steamStoreURL}
 
-	for _, u := range allSteamURLs {
+	for _, u := range authDomains {
+		if sessionID != "" {
+			ck := &http.Cookie{Name: "sessionid", Value: sessionID, Path: "/"}
+			c.Jar.SetCookies(u, []*http.Cookie{ck})
+		}
 		if steamLoginSecure != "" {
 			ck := &http.Cookie{Name: "steamLoginSecure", Value: secureValue, Path: "/", Secure: true, HttpOnly: true}
 			c.Jar.SetCookies(u, []*http.Cookie{ck})
@@ -199,6 +202,57 @@ func (c *Client) SetSessionCookies(sessionID, steamLoginSecure, refreshToken str
 			}
 			ck := &http.Cookie{Name: "steamRefresh_steam", Value: refVal, Path: "/", Secure: true, HttpOnly: true}
 			c.Jar.SetCookies(u, []*http.Cookie{ck})
+		}
+	}
+}
+
+// syncSessionCookies synchronizes auth cookies between steamcommunity.com and store.steampowered.com.
+// Replicates steampy's set_sessionid_cookies() logic: if a cookie exists in one domain but not the other, copy it.
+func (c *Client) syncSessionCookies() {
+	if c.Jar == nil {
+		return
+	}
+
+	authNames := []string{"steamLoginSecure", "sessionid", "steamRefresh_steam", "steamCountry"}
+
+	communityAll := c.Jar.Cookies(steamCommunityURL)
+	storeAll := c.Jar.Cookies(steamStoreURL)
+
+	communityMap := make(map[string]string)
+	for _, ck := range communityAll {
+		communityMap[ck.Name] = ck.Value
+	}
+	storeMap := make(map[string]string)
+	for _, ck := range storeAll {
+		storeMap[ck.Name] = ck.Value
+	}
+
+	for _, name := range authNames {
+		cVal := communityMap[name]
+		sVal := storeMap[name]
+
+		if cVal == "" && sVal == "" {
+			continue
+		}
+
+		// Determine canonical value: prefer whichever domain has it
+		canonical := cVal
+		if canonical == "" {
+			canonical = sVal
+		}
+
+		isSecure := name == "steamLoginSecure" || name == "steamRefresh_steam"
+		isHTTPOnly := name == "steamLoginSecure" || name == "steamRefresh_steam"
+
+		if cVal == "" {
+			c.Jar.SetCookies(steamCommunityURL, []*http.Cookie{{
+				Name: name, Value: canonical, Path: "/", Secure: isSecure, HttpOnly: isHTTPOnly,
+			}})
+		}
+		if sVal == "" {
+			c.Jar.SetCookies(steamStoreURL, []*http.Cookie{{
+				Name: name, Value: canonical, Path: "/", Secure: isSecure, HttpOnly: isHTTPOnly,
+			}})
 		}
 	}
 }
@@ -473,7 +527,7 @@ func (c *Client) LoginWithRefreshTokenWithContext(ctx context.Context) error {
 			c.mu.Unlock()
 		}
 
-		// Perform /login/settoken transfer for each domain (store, community, help, checkout) with retries
+		// Perform /login/settoken transfer for each domain — single attempt each (like steampy)
 		for _, info := range finResult.TransferInfo {
 			if info.URL == "" {
 				continue
@@ -484,22 +538,18 @@ func (c *Client) LoginWithRefreshTokenWithContext(ctx context.Context) error {
 			}
 			tData.Set("steamID", steamID)
 
-			for attempt := 0; attempt < 3; attempt++ {
-				tReq, err := c.newAjaxPostRequestWithContext(ctx, info.URL, tData, "https://steamcommunity.com/")
-				if err != nil {
-					continue
-				}
-				tResp, err := c.doRequestWithRetry(ctx, tReq)
-				if err == nil {
-					tResp.Body.Close()
-					break
-				}
-				time.Sleep(300 * time.Millisecond)
+			tReq, err := c.newAjaxPostRequestWithContext(ctx, info.URL, tData, "https://steamcommunity.com/")
+			if err != nil {
+				continue
+			}
+			tResp, err := c.doRequestWithRetry(ctx, tReq)
+			if err == nil {
+				tResp.Body.Close()
 			}
 		}
 
-		// Ensure essential session cookies (steamLoginSecure, sessionid) exist for steamcommunity.com
-		c.ensureSessionCookiesForURL(steamCommunityURL)
+		// Synchronize auth cookies between community and store domains (like steampy's set_sessionid_cookies)
+		c.syncSessionCookies()
 
 		c.mu.Lock()
 		c.LoggedIn = true
@@ -541,18 +591,25 @@ func (c *Client) Login() error {
 }
 
 // LoginWithContext executes modern Steam Web Auth API with context support.
+// Login flow is modeled after steampy (artemiyDev/steampy) to avoid creating
+// multiple sessions that trigger Steam account restrictions.
 func (c *Client) LoginWithContext(ctx context.Context) error {
-	// 1. Organically fetch starting sessionid and cookies from servers
-	c.InitSession(ctx)
-
 	c.mu.RLock()
 	existingRefreshToken := c.Config.RefreshToken
 	username := c.Config.Username
 	password := c.Config.Password
 	sharedSecret := c.Config.SharedSecret
+	alreadyLoggedIn := c.LoggedIn
 	c.mu.RUnlock()
 
-	// If we already have a refresh token (e.g. from maFile), try logging in with it first
+	// If already logged in, check if session is still alive before re-creating (like steampy)
+	if alreadyLoggedIn {
+		if alive, _ := c.IsSessionAliveWithContext(ctx); alive {
+			return nil
+		}
+	}
+
+	// If we already have a refresh token (e.g. from maFile), try refreshing first
 	if existingRefreshToken != "" {
 		if err := c.LoginWithRefreshTokenWithContext(ctx); err == nil {
 			return nil
@@ -566,14 +623,24 @@ func (c *Client) LoginWithContext(ctx context.Context) error {
 	if username == "" || password == "" {
 		return fmt.Errorf("username and password are required for login")
 	}
+	if sharedSecret == "" {
+		return fmt.Errorf("shared_secret is required for 2FA authentication")
+	}
 
-	var clientID uint64
-	var requestID []byte
-	var steamID string
-	var lastBeginBody []byte
+	// Clear auth cookies before credentials login (like steampy's _clear_auth_cookies)
+	if c.Jar != nil {
+		c.Jar.ClearAuthCookies()
+	}
+
+	// Set steamRememberLogin before credentials login (like steampy)
+	rememberCk := &http.Cookie{Name: "steamRememberLogin", Value: "true", Path: "/"}
+	c.Jar.SetCookies(steamCommunityURL, []*http.Cookie{rememberCk})
+	c.Jar.SetCookies(steamStoreURL, []*http.Cookie{rememberCk})
+
+	// Fetch RSA public key (retry up to 5 times, like steampy's MAX_RSA_ATTEMPTS)
+	var rsaMod, rsaExp, rsaTs string
 	var lastErr error
-
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 5; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -584,28 +651,34 @@ func (c *Client) LoginWithContext(ctx context.Context) error {
 			case <-time.After(1 * time.Second):
 			}
 		}
-
-		mod, exp, ts, err := c.fetchRSAPublicKeyWithContext(ctx, username)
-		if err != nil {
-			lastErr = fmt.Errorf("fetch RSA key error: %w", err)
-			continue
+		// GET steamcommunity.com before RSA fetch (like steampy's _fetch_rsa_params)
+		if req, err := c.newRequestWithContext(ctx, "GET", "https://steamcommunity.com/", nil, ""); err == nil {
+			if resp, err := c.HTTPClient.Do(req); err == nil {
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}
 		}
 
-		clientID, requestID, steamID, lastBeginBody, err = c.beginAuthSessionWithContext(ctx, username, password, mod, exp, ts)
-		if err == nil && clientID != 0 {
+		var err error
+		rsaMod, rsaExp, rsaTs, err = c.fetchRSAPublicKeyWithContext(ctx, username)
+		if err == nil {
 			break
 		}
-		if err != nil {
-			lastErr = fmt.Errorf("begin auth session error: %w", err)
-		} else if len(lastBeginBody) > 0 {
-			lastErr = fmt.Errorf("begin auth session failed: %s", string(lastBeginBody))
-		}
+		lastErr = fmt.Errorf("fetch RSA key error: %w", err)
 	}
-
-	if clientID == 0 {
+	if rsaMod == "" {
 		if lastErr != nil {
 			return lastErr
 		}
+		return fmt.Errorf("failed to fetch RSA public key")
+	}
+
+	// BeginAuthSession — single attempt, no retry (each attempt creates a new client_id on Steam)
+	clientID, requestID, steamID, lastBeginBody, err := c.beginAuthSessionWithContext(ctx, username, password, rsaMod, rsaExp, rsaTs)
+	if err != nil {
+		return fmt.Errorf("begin auth session error: %w", err)
+	}
+	if clientID == 0 {
 		return fmt.Errorf("begin auth session failed: %s", string(lastBeginBody))
 	}
 
@@ -613,34 +686,18 @@ func (c *Client) LoginWithContext(ctx context.Context) error {
 	c.Config.SteamID = steamID
 	c.mu.Unlock()
 
-	if sharedSecret == "" {
-		return fmt.Errorf("shared_secret is required for 2FA authentication")
+	// Generate 2FA code — single attempt, current time, no offset (like steampy)
+	twoFactorCode, err := GenerateTwoFactorCode(sharedSecret, 0)
+	if err != nil {
+		return fmt.Errorf("failed to generate 2FA code: %w", err)
 	}
 
-	// Perform initial status poll immediately after BeginAuth to initialize session state on Steam backend
-	_, _, _ = c.pollAuthSessionStatusOnce(ctx, clientID, requestID)
-
-	var updateErr error
-	offsets := []int64{0, -30, 30}
-	for _, offset := range offsets {
-		t := time.Now().Unix() + offset
-		twoFactorCode, err := GenerateTwoFactorCode(sharedSecret, t)
-		if err != nil {
-			twoFactorCode, _ = c.Generate2FACode()
-		}
-
-		updateErr = c.updateAuthSession2FAWithContext(ctx, clientID, steamID, twoFactorCode)
-		if updateErr == nil {
-			break
-		}
-		if !strings.Contains(updateErr.Error(), "eresult 8") {
-			break
-		}
-	}
-	if updateErr != nil {
-		return updateErr
+	// Submit Steam Guard code — only code_type=3 (like steampy)
+	if err := c.updateAuthSession2FAWithContext(ctx, clientID, steamID, twoFactorCode); err != nil {
+		return err
 	}
 
+	// Poll for tokens (like steampy's _poll_session_status)
 	rToken, aToken, err := c.pollAuthSessionStatusWithContext(ctx, clientID, requestID)
 	if err != nil {
 		return err
@@ -649,15 +706,84 @@ func (c *Client) LoginWithContext(ctx context.Context) error {
 	c.mu.Lock()
 	c.Config.RefreshToken = rToken
 	c.Config.AccessToken = aToken
-	sessionID := c.SessionID
 	c.mu.Unlock()
 
+	// Finalize login with the new refresh token
 	if err := c.LoginWithRefreshTokenWithContext(ctx); err != nil {
+		// Fallback: manually set cookies from tokens
+		c.mu.RLock()
+		sessionID := c.SessionID
+		c.mu.RUnlock()
 		jwtSteamLoginSecure := fmt.Sprintf("%s||%s", steamID, aToken)
 		c.SetSessionCookies(sessionID, jwtSteamLoginSecure, rToken)
 	}
 
 	return nil
+}
+
+// IsSessionAlive checks whether the current Steam session is still authenticated.
+// Modeled after steampy's _check_steam_session / is_session_alive.
+func (c *Client) IsSessionAlive() (bool, error) {
+	return c.IsSessionAliveWithContext(context.Background())
+}
+
+// IsSessionAliveWithContext checks session liveness with context support.
+func (c *Client) IsSessionAliveWithContext(ctx context.Context) (bool, error) {
+	// Check store account page — redirect to /login means session is dead
+	storeReq, err := c.newRequestWithContext(ctx, "GET", "https://store.steampowered.com/account/", nil, "")
+	if err != nil {
+		return false, err
+	}
+	storeResp, err := c.HTTPClient.Do(storeReq)
+	if err != nil {
+		return false, err
+	}
+	storeBody, _ := readResponseBody(storeResp)
+	_ = storeBody
+
+	storeURL := ""
+	if storeResp.Request != nil && storeResp.Request.URL != nil {
+		storeURL = strings.ToLower(storeResp.Request.URL.String())
+	}
+	if strings.Contains(storeURL, "/login") {
+		return false, nil
+	}
+
+	// Check community page for g_steamID marker
+	communityReq, err := c.newRequestWithContext(ctx, "GET", "https://steamcommunity.com/", nil, "")
+	if err != nil {
+		// Store check passed, consider alive
+		return storeResp.StatusCode == http.StatusOK, nil
+	}
+	communityResp, err := c.HTTPClient.Do(communityReq)
+	if err != nil {
+		return storeResp.StatusCode == http.StatusOK, nil
+	}
+	communityBody, _ := readResponseBody(communityResp)
+
+	communityURL := ""
+	if communityResp.Request != nil && communityResp.Request.URL != nil {
+		communityURL = strings.ToLower(communityResp.Request.URL.String())
+	}
+	if strings.Contains(communityURL, "/login") {
+		return false, nil
+	}
+
+	// Look for g_steamID marker (like steampy)
+	if regexp.MustCompile(`g_steamID = "\d+";`).Match(communityBody) {
+		return true, nil
+	}
+
+	// Fallback: check if username appears on community page
+	c.mu.RLock()
+	username := c.Config.Username
+	c.mu.RUnlock()
+	if username != "" && strings.Contains(strings.ToLower(string(communityBody)), strings.ToLower(username)) {
+		return true, nil
+	}
+
+	// Last resort: trust store status code
+	return storeResp.StatusCode == http.StatusOK, nil
 }
 
 // fetchRSAPublicKeyWithContext fetches the Steam RSA public key for the given username.
@@ -816,6 +942,7 @@ func (c *Client) beginAuthSessionWithContext(ctx context.Context, username, pass
 
 // updateAuthSession2FAWithContext submits the Steam Guard TOTP code for the auth session.
 // Uses protobuf-encoded multipart/form-data identical to the Chrome browser.
+// Only uses code_type=3 (DeviceConfirmation), matching steampy's behavior.
 func (c *Client) updateAuthSession2FAWithContext(ctx context.Context, clientID uint64, steamID, twoFactorCode string) error {
 	sidUint, _ := strconv.ParseUint(steamID, 10, 64)
 
@@ -823,48 +950,40 @@ func (c *Client) updateAuthSession2FAWithContext(ctx context.Context, clientID u
 	//   [1] client_id  (uint64 varint)
 	//   [2] steamid    (fixed64 wire type 1)
 	//   [3] code       (string)
-	//   [4] code_type  = 2 (k_EAuthSessionGuardType_DeviceCode) / 3 (DeviceConfirmation)
-	var lastErr error
-	for _, codeType := range []uint64{2, 3} {
-		var pb []byte
-		pb = append(pb, pbVarint(1, clientID)...)
-		if sidUint > 0 {
-			pb = append(pb, pbInt64(2, sidUint)...)
-		}
-		pb = append(pb, pbString(3, twoFactorCode)...)
-		pb = append(pb, pbVarint(4, codeType)...)
+	//   [4] code_type  = 3 (DeviceConfirmation, like steampy)
+	var pb []byte
+	pb = append(pb, pbVarint(1, clientID)...)
+	if sidUint > 0 {
+		pb = append(pb, pbInt64(2, sidUint)...)
+	}
+	pb = append(pb, pbString(3, twoFactorCode)...)
+	pb = append(pb, pbVarint(4, 3)...) // code_type=3 only
 
-		updateReq, err := c.newMultipartProtoRequest(
-			ctx,
-			"https://api.steampowered.com/IAuthenticationService/UpdateAuthSessionWithSteamGuardCode/v1",
-			pb,
-			"https://steamcommunity.com/",
-		)
-		if err != nil {
-			return err
-		}
-
-		updateResp, err := c.doRequestWithRetry(ctx, updateReq)
-		if err != nil {
-			lastErr = fmt.Errorf("update auth session failed: %w", err)
-			continue
-		}
-
-		body, _ := readResponseBody(updateResp)
-		if updateResp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("update auth session HTTP %d: %s (x-eresult: %s)",
-				updateResp.StatusCode, string(body), updateResp.Header.Get("X-eresult"))
-			continue
-		}
-		if eresult := updateResp.Header.Get("X-eresult"); eresult != "" && eresult != "1" {
-			lastErr = fmt.Errorf("update auth session failed with eresult %s: %s", eresult, string(body))
-			continue
-		}
-
-		return nil
+	updateReq, err := c.newMultipartProtoRequest(
+		ctx,
+		"https://api.steampowered.com/IAuthenticationService/UpdateAuthSessionWithSteamGuardCode/v1",
+		pb,
+		"https://steamcommunity.com/",
+	)
+	if err != nil {
+		return err
 	}
 
-	return lastErr
+	updateResp, err := c.doRequestWithRetry(ctx, updateReq)
+	if err != nil {
+		return fmt.Errorf("update auth session failed: %w", err)
+	}
+
+	body, _ := readResponseBody(updateResp)
+	if updateResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("update auth session HTTP %d: %s (x-eresult: %s)",
+			updateResp.StatusCode, string(body), updateResp.Header.Get("X-eresult"))
+	}
+	if eresult := updateResp.Header.Get("X-eresult"); eresult != "" && eresult != "1" {
+		return fmt.Errorf("update auth session failed with eresult %s: %s", eresult, string(body))
+	}
+
+	return nil
 }
 
 // pollAuthSessionStatusOnce executes a single PollAuthSessionStatus request to register session state.

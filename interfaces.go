@@ -77,6 +77,8 @@ type AccountService interface {
 	LoginWithContext(ctx context.Context) error
 	LoginWithRefreshToken() error
 	LoginWithRefreshTokenWithContext(ctx context.Context) error
+	IsSessionAlive() (bool, error)
+	IsSessionAliveWithContext(ctx context.Context) (bool, error)
 	GetAccountStatus() (*AccountStatus, error)
 	GetAccountStatusWithContext(ctx context.Context) (*AccountStatus, error)
 	GetWalletBalance() (balance, pendingBalance, pendingAvailability string, err error)
