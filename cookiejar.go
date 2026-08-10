@@ -4,7 +4,9 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strings"
 	"sync"
+	"time"
 )
 
 // TrackingCookieJar wraps a standard http.CookieJar and additionally stores
@@ -74,4 +76,56 @@ func (t *TrackingCookieJar) GetAllCookies() []*http.Cookie {
 		result = append(result, &clone)
 	}
 	return result
+}
+
+// ClearAuthCookies removes all session and authentication cookies from the jar
+// to prevent session cross-contamination when changing accounts or logins,
+// matching steampy's _clear_auth_cookies behavior.
+func (t *TrackingCookieJar) ClearAuthCookies() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	authNames := map[string]bool{
+		"sessionid":          true,
+		"steamLoginSecure":   true,
+		"steamRefresh_steam": true,
+		"steamCountry":       true,
+		"steamRememberLogin": true,
+	}
+
+	// We expire cookies in the underlying jar by setting them with a past expiration date
+	expiredTime := time.Unix(1, 0)
+
+	// Group tracking cookies by domain/path to clear them in the underlying jar
+	cookiesToClearByHost := make(map[string][]*http.Cookie)
+
+	for key, ck := range t.cookies {
+		if authNames[ck.Name] {
+			delete(t.cookies, key)
+
+			expiredCk := &http.Cookie{
+				Name:    ck.Name,
+				Value:   "",
+				Path:    ck.Path,
+				Domain:  ck.Domain,
+				Expires: expiredTime,
+				MaxAge:  -1,
+			}
+
+			// We need a proper URL scheme for Jar.SetCookies
+			scheme := "https"
+			host := ck.Domain
+			if strings.HasPrefix(host, ".") {
+				host = host[1:]
+			}
+			uStr := scheme + "://" + host + ck.Path
+			cookiesToClearByHost[uStr] = append(cookiesToClearByHost[uStr], expiredCk)
+		}
+	}
+
+	for uStr, cks := range cookiesToClearByHost {
+		if u, err := url.Parse(uStr); err == nil {
+			t.jar.SetCookies(u, cks)
+		}
+	}
 }

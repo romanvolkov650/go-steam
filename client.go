@@ -166,6 +166,10 @@ func (c *CookieJSON) UnmarshalJSON(data []byte) error {
 }
 
 func (c *Client) SetSessionCookies(sessionID, steamLoginSecure, refreshToken string) {
+	if c.Jar != nil {
+		c.Jar.ClearAuthCookies()
+	}
+
 	c.mu.Lock()
 	if sessionID != "" {
 		c.SessionID = sessionID
@@ -277,6 +281,10 @@ func (c *Client) ExportCookiesJSON() (string, error) {
 
 // ImportCookies loads cookies from a list of CookieJSON structures into the client's CookieJar.
 func (c *Client) ImportCookies(cookies []*CookieJSON) {
+	if c.Jar != nil {
+		c.Jar.ClearAuthCookies()
+	}
+
 	for _, ck := range cookies {
 		if ck.Name == "" || ck.Value == "" {
 			continue
@@ -360,6 +368,16 @@ func (c *Client) ImportCookies(cookies []*CookieJSON) {
 			}
 		}
 	}
+
+	// Replicate steampy's behavior of setting steamRememberLogin to true for auth domains
+	rememberCookie := &http.Cookie{
+		Name:   "steamRememberLogin",
+		Value:  "true",
+		Path:   "/",
+		Secure: true,
+	}
+	c.Jar.SetCookies(steamCommunityURL, []*http.Cookie{rememberCookie})
+	c.Jar.SetCookies(steamStoreURL, []*http.Cookie{rememberCookie})
 }
 
 // ImportCookiesJSON loads cookies from a JSON formatted string.

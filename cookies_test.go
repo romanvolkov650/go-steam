@@ -1,6 +1,8 @@
 package steam
 
 import (
+	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -148,12 +150,74 @@ func TestDomainIsolatedCookies(t *testing.T) {
 	}
 
 	hasBrowserID := false
+	hasCommunityRemember := false
+	hasStoreRemember := false
+
 	for _, ck := range exported {
 		if ck.Name == "browserid" && ck.Value == "browser_id_789" {
 			hasBrowserID = true
 		}
+		if ck.Name == "steamRememberLogin" && ck.Value == "true" {
+			if strings.Contains(ck.Domain, "steamcommunity.com") {
+				hasCommunityRemember = true
+			}
+			if strings.Contains(ck.Domain, "store.steampowered.com") {
+				hasStoreRemember = true
+			}
+		}
 	}
 	if !hasBrowserID {
 		t.Errorf("Expected browserid cookie to be preserved in export")
+	}
+	if !hasCommunityRemember {
+		t.Errorf("Expected steamRememberLogin=true for steamcommunity.com")
+	}
+	if !hasStoreRemember {
+		t.Errorf("Expected steamRememberLogin=true for store.steampowered.com")
+	}
+}
+
+func TestClearAuthCookies(t *testing.T) {
+	client, err := NewClient(ClientConfig{Username: "testuser"})
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+
+	// Set initial session cookies
+	client.SetSessionCookies("old_session", "old_secure", "old_refresh")
+
+	// Set a non-auth cookie to ensure it's NOT cleared
+	otherCookie := &http.Cookie{
+		Name:   "other_cookie",
+		Value:  "keep_me",
+		Path:   "/",
+		Domain: "steamcommunity.com",
+	}
+	client.Jar.SetCookies(steamCommunityURL, []*http.Cookie{otherCookie})
+
+	// Now set a new session
+	client.SetSessionCookies("new_session", "new_secure", "new_refresh")
+
+	// Verify old auth cookies are gone and only new ones exist
+	exported, err := client.ExportCookies()
+	if err != nil {
+		t.Fatalf("Failed to export cookies: %v", err)
+	}
+
+	hasOther := false
+	for _, ck := range exported {
+		if ck.Name == "sessionid" && ck.Value == "old_session" {
+			t.Errorf("Expected old sessionid to be cleared")
+		}
+		if ck.Name == "steamLoginSecure" && ck.Value == "old_secure" {
+			t.Errorf("Expected old steamLoginSecure to be cleared")
+		}
+		if ck.Name == "other_cookie" && ck.Value == "keep_me" {
+			hasOther = true
+		}
+	}
+
+	if !hasOther {
+		t.Errorf("Expected non-auth 'other_cookie' to be preserved")
 	}
 }
