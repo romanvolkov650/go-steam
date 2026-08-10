@@ -602,13 +602,25 @@ func (c *Client) LoginWithContext(ctx context.Context) error {
 	// Perform initial status poll immediately after BeginAuth to initialize session state on Steam backend
 	_, _, _ = c.pollAuthSessionStatusOnce(ctx, clientID, requestID)
 
-	twoFactorCode, err := c.Generate2FACode()
-	if err != nil {
-		return fmt.Errorf("failed to generate 2FA code: %w", err)
-	}
+	var updateErr error
+	offsets := []int64{0, -30, 30}
+	for _, offset := range offsets {
+		t := time.Now().Unix() + offset
+		twoFactorCode, err := GenerateTwoFactorCode(sharedSecret, t)
+		if err != nil {
+			twoFactorCode, _ = c.Generate2FACode()
+		}
 
-	if err := c.updateAuthSession2FAWithContext(ctx, clientID, steamID, twoFactorCode); err != nil {
-		return err
+		updateErr = c.updateAuthSession2FAWithContext(ctx, clientID, steamID, twoFactorCode)
+		if updateErr == nil {
+			break
+		}
+		if !strings.Contains(updateErr.Error(), "eresult 8") {
+			break
+		}
+	}
+	if updateErr != nil {
+		return updateErr
 	}
 
 	rToken, aToken, err := c.pollAuthSessionStatusWithContext(ctx, clientID, requestID)
@@ -791,40 +803,50 @@ func (c *Client) updateAuthSession2FAWithContext(ctx context.Context, clientID u
 
 	// CAuthentication_UpdateAuthSessionWithSteamGuardCode_Request:
 	//   [1] client_id  (uint64 varint)
-	//   [2] steamid    (uint64 varint)
+	//   [2] steamid    (fixed64 wire type 1)
 	//   [3] code       (string)
-	//   [4] code_type  = 3 (device TOTP)
-	var pb []byte
-	pb = append(pb, pbVarint(1, clientID)...)
-	pb = append(pb, pbVarint(2, sidUint)...)
-	pb = append(pb, pbString(3, twoFactorCode)...)
-	pb = append(pb, pbVarint(4, 3)...)
+	//   [4] code_type  = 2 (k_EAuthSessionGuardType_DeviceCode) / 3 (DeviceConfirmation)
+	var lastErr error
+	for _, codeType := range []uint64{2, 3} {
+		var pb []byte
+		pb = append(pb, pbVarint(1, clientID)...)
+		if sidUint > 0 {
+			pb = append(pb, pbInt64(2, sidUint)...)
+		}
+		pb = append(pb, pbString(3, twoFactorCode)...)
+		pb = append(pb, pbVarint(4, codeType)...)
 
-	updateReq, err := c.newMultipartProtoRequest(
-		ctx,
-		"https://api.steampowered.com/IAuthenticationService/UpdateAuthSessionWithSteamGuardCode/v1",
-		pb,
-		"https://steamcommunity.com/",
-	)
-	if err != nil {
-		return err
+		updateReq, err := c.newMultipartProtoRequest(
+			ctx,
+			"https://api.steampowered.com/IAuthenticationService/UpdateAuthSessionWithSteamGuardCode/v1",
+			pb,
+			"https://steamcommunity.com/",
+		)
+		if err != nil {
+			return err
+		}
+
+		updateResp, err := c.doRequestWithRetry(ctx, updateReq)
+		if err != nil {
+			lastErr = fmt.Errorf("update auth session failed: %w", err)
+			continue
+		}
+
+		body, _ := readResponseBody(updateResp)
+		if updateResp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("update auth session HTTP %d: %s (x-eresult: %s)",
+				updateResp.StatusCode, string(body), updateResp.Header.Get("X-eresult"))
+			continue
+		}
+		if eresult := updateResp.Header.Get("X-eresult"); eresult != "" && eresult != "1" {
+			lastErr = fmt.Errorf("update auth session failed with eresult %s: %s", eresult, string(body))
+			continue
+		}
+
+		return nil
 	}
 
-	updateResp, err := c.doRequestWithRetry(ctx, updateReq)
-	if err != nil {
-		return fmt.Errorf("update auth session failed: %w", err)
-	}
-
-	body, _ := readResponseBody(updateResp)
-	if updateResp.StatusCode != http.StatusOK {
-		return fmt.Errorf("update auth session HTTP %d: %s (x-eresult: %s)",
-			updateResp.StatusCode, string(body), updateResp.Header.Get("X-eresult"))
-	}
-	if eresult := updateResp.Header.Get("X-eresult"); eresult != "" && eresult != "1" {
-		return fmt.Errorf("update auth session failed with eresult %s: %s", eresult, string(body))
-	}
-
-	return nil
+	return lastErr
 }
 
 // pollAuthSessionStatusOnce executes a single PollAuthSessionStatus request to register session state.

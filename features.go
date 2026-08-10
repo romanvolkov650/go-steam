@@ -168,6 +168,16 @@ func extractBalanceFromHTML(bodyStr string) string {
 	return bal
 }
 
+// GetWalletBalance fetches wallet balance details (balance, pendingBalance, pendingAvailability).
+func (c *Client) GetWalletBalance() (balance, pendingBalance, pendingAvailability string, err error) {
+	return c.GetWalletBalanceWithContext(context.Background())
+}
+
+// GetWalletBalanceWithContext fetches wallet balance details with context support.
+func (c *Client) GetWalletBalanceWithContext(ctx context.Context) (balance, pendingBalance, pendingAvailability string, err error) {
+	return c.fetchWalletBalanceWithContext(ctx)
+}
+
 func (c *Client) fetchWalletBalanceWithContext(ctx context.Context) (balance, pendingBalance, pendingAvailability string, err error) {
 	// Query ONLY store.steampowered.com/account/
 	reqAccount, err := c.newRequestWithContext(ctx, "GET", "https://store.steampowered.com/account/", nil, "https://store.steampowered.com/")
@@ -183,7 +193,7 @@ func (c *Client) fetchWalletBalanceWithContext(ctx context.Context) (balance, pe
 
 	bal, pendingBal, avail := extractWalletBalanceDetailsFromHTML(string(bodyBytes))
 	if bal == "" {
-		bal = "0.00"
+		return "0.00", "", "", fmt.Errorf("failed to extract wallet balance: session may be expired or invalid")
 	}
 	return bal, pendingBal, avail, nil
 }

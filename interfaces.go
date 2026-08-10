@@ -79,6 +79,8 @@ type AccountService interface {
 	LoginWithRefreshTokenWithContext(ctx context.Context) error
 	GetAccountStatus() (*AccountStatus, error)
 	GetAccountStatusWithContext(ctx context.Context) (*AccountStatus, error)
+	GetWalletBalance() (balance, pendingBalance, pendingAvailability string, err error)
+	GetWalletBalanceWithContext(ctx context.Context) (balance, pendingBalance, pendingAvailability string, err error)
 	GetTradeURL() (string, error)
 	GetTradeURLWithContext(ctx context.Context) (string, error)
 	GetAvatarURL() (string, error)
