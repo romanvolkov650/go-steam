@@ -40,14 +40,10 @@ type MASession struct {
 // ToClientConfig extracts ClientConfig parameters from the MAFile.
 func (m *MAFile) ToClientConfig(password, proxyURL string) ClientConfig {
 	steamID := ""
-	accessToken := ""
-	refreshToken := ""
 	if m.Session != nil {
 		if m.Session.SteamID != 0 {
 			steamID = strconv.FormatUint(uint64(m.Session.SteamID), 10)
 		}
-		accessToken = m.Session.AccessToken
-		refreshToken = m.Session.RefreshToken
 	}
 
 	return ClientConfig{
@@ -58,8 +54,6 @@ func (m *MAFile) ToClientConfig(password, proxyURL string) ClientConfig {
 		SteamID:        steamID,
 		DeviceID:       m.DeviceID,
 		ProxyURL:       proxyURL,
-		AccessToken:    accessToken,
-		RefreshToken:   refreshToken,
 	}
 }
 

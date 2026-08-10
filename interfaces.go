@@ -95,6 +95,8 @@ type AccountService interface {
 	ImportCookiesJSON(jsonStr string) error
 	SaveCookiesToFile(filePath string) error
 	LoadCookiesFromFile(filePath string) error
+	Logout() error
+	LogoutWithContext(ctx context.Context) error
 }
 
 // SteamClient combines all service interfaces into a unified contract.

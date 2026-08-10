@@ -365,6 +365,12 @@ func (c *Client) ImportCookies(cookies []*CookieJSON) {
 			}
 			c.mu.Unlock()
 		}
+		if ck.Name == "steamRefresh_steam" && ck.Value != "" {
+			cleanVal := strings.ReplaceAll(ck.Value, "%7C", "|")
+			c.mu.Lock()
+			c.Config.RefreshToken = cleanVal
+			c.mu.Unlock()
+		}
 
 		val := ck.Value
 		if ck.Name == "steamLoginSecure" || ck.Name == "steamRefresh_steam" {
@@ -721,6 +727,49 @@ func (c *Client) LoginWithContext(ctx context.Context) error {
 	return nil
 }
 
+// Logout terminates the current Steam session by calling /login/logout/.
+func (c *Client) Logout() error {
+	return c.LogoutWithContext(context.Background())
+}
+
+// LogoutWithContext terminates the current Steam session with context support.
+func (c *Client) LogoutWithContext(ctx context.Context) error {
+	c.mu.RLock()
+	sessionID := c.SessionID
+	c.mu.RUnlock()
+
+	data := url.Values{
+		"sessionid": {sessionID},
+	}
+
+	req, err := c.newAjaxPostRequestWithContext(ctx, "https://store.steampowered.com/login/logout/", data, "https://store.steampowered.com/")
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+
+	// Check if session is still alive (post-check validation)
+	alive, err := c.IsSessionAliveWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to verify session status after logout: %w", err)
+	}
+
+	if alive {
+		return fmt.Errorf("logout unsuccessful: session is still alive")
+	}
+
+	c.mu.Lock()
+	c.LoggedIn = false
+	c.mu.Unlock()
+
+	return nil
+}
+
 // IsSessionAlive checks whether the current Steam session is still authenticated.
 // Modeled after steampy's _check_steam_session / is_session_alive.
 func (c *Client) IsSessionAlive() (bool, error) {
@@ -883,8 +932,8 @@ func (c *Client) beginAuthSessionWithContext(ctx context.Context, username, pass
 	pb = append(pb, pbString(2, username)...)
 	pb = append(pb, pbString(3, encryptedPassword)...)
 	pb = append(pb, pbVarint(4, ts)...)
-	pb = append(pb, pbVarint(5, 1)...)  // remember_login
-	pb = append(pb, pbVarint(7, 1)...)  // persistence
+	pb = append(pb, pbVarint(5, 1)...) // remember_login
+	pb = append(pb, pbVarint(7, 1)...) // persistence
 	pb = append(pb, pbString(8, "Community")...)
 	pb = append(pb, pbNested(9, deviceDetails)...)
 	pb = append(pb, pbVarint(11, 0)...) // language
