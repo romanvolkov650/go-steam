@@ -156,7 +156,7 @@ func TestSendTradeOffer(t *testing.T) {
 			t.Errorf("Unexpected path: %s", r.URL.Path)
 		}
 		r.ParseForm()
-		if r.FormValue("sessionid") != "test_session_id" || r.FormValue("partner") != "76561198000000000" {
+		if r.FormValue("sessionid") != "test_session_id" || r.FormValue("partner") != "76561198060265728" {
 			t.Errorf("Unexpected form values: %+v", r.Form)
 		}
 
@@ -179,7 +179,7 @@ func TestSendTradeOffer(t *testing.T) {
 		{AssetID: "222", AppID: 730, ContextID: "2"},
 	}
 
-	offerID, needsConf, err := client.SendTradeOffer("76561198000000000", itemsToGive, itemsToReceive, "Hello", "test_token")
+	offerID, needsConf, err := client.SendTradeOffer("https://steamcommunity.com/tradeoffer/new/?partner=100000000&token=test_token", itemsToGive, itemsToReceive, "Hello")
 	if err != nil {
 		t.Fatalf("SendTradeOffer error: %v", err)
 	}

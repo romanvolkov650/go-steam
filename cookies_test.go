@@ -100,3 +100,60 @@ func TestSteampyCookieImport(t *testing.T) {
 		t.Errorf("Expected LoggedIn to be true")
 	}
 }
+
+func TestDomainIsolatedCookies(t *testing.T) {
+	multiDomainJSON := `[
+		{
+			"name": "sessionid",
+			"value": "community_session_123",
+			"domain": "steamcommunity.com",
+			"path": "/"
+		},
+		{
+			"name": "sessionid",
+			"value": "store_session_456",
+			"domain": "store.steampowered.com",
+			"path": "/"
+		},
+		{
+			"name": "browserid",
+			"value": "browser_id_789",
+			"domain": "steamcommunity.com",
+			"path": "/"
+		}
+	]`
+
+	client, err := NewClient(ClientConfig{Username: "testuser"})
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+
+	if err := client.ImportCookiesJSON(multiDomainJSON); err != nil {
+		t.Fatalf("Failed to import multi-domain cookies: %v", err)
+	}
+
+	communitySession := client.GetSessionIDForURL(steamCommunityURL)
+	if communitySession != "community_session_123" {
+		t.Errorf("Expected community session 'community_session_123', got '%s'", communitySession)
+	}
+
+	storeSession := client.GetSessionIDForURL(steamStoreURL)
+	if storeSession != "store_session_456" {
+		t.Errorf("Expected store session 'store_session_456', got '%s'", storeSession)
+	}
+
+	exported, err := client.ExportCookies()
+	if err != nil {
+		t.Fatalf("Failed to export cookies: %v", err)
+	}
+
+	hasBrowserID := false
+	for _, ck := range exported {
+		if ck.Name == "browserid" && ck.Value == "browser_id_789" {
+			hasBrowserID = true
+		}
+	}
+	if !hasBrowserID {
+		t.Errorf("Expected browserid cookie to be preserved in export")
+	}
+}

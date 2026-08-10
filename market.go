@@ -161,8 +161,8 @@ func (c *Client) CreateSellOrder(assetID string, appID int, contextID string, pr
 func (c *Client) CreateSellOrderWithContext(ctx context.Context, assetID string, appID int, contextID string, priceInCents int, amount ...int) (*CreateSellOrderResponse, error) {
 	sellURL := "https://steamcommunity.com/market/sellitem/"
 
+	sessionID := c.GetSessionID()
 	c.mu.RLock()
-	sessionID := c.SessionID
 	steamID := c.Config.SteamID
 	c.mu.RUnlock()
 
@@ -240,9 +240,9 @@ func (c *Client) createBuyOrderInternal(appID int, marketHashName string, priceI
 func (c *Client) createBuyOrderInternalWithContext(ctx context.Context, appID int, marketHashName string, priceInCents int, quantity int, confirmationID string, currency ...int) (*CreateBuyOrderResponse, error) {
 	buyURL := "https://steamcommunity.com/market/createbuyorder/"
 
+	sessionID := c.GetSessionID()
 	c.mu.RLock()
 	walletCurrency := c.WalletCurrency
-	sessionID := c.SessionID
 	c.mu.RUnlock()
 
 	currencyID := walletCurrency
@@ -367,9 +367,7 @@ func (c *Client) CancelSellOrder(listingID string) error {
 func (c *Client) CancelSellOrderWithContext(ctx context.Context, listingID string) error {
 	cancelURL := fmt.Sprintf("https://steamcommunity.com/market/removelisting/%s", listingID)
 
-	c.mu.RLock()
-	sessionID := c.SessionID
-	c.mu.RUnlock()
+	sessionID := c.GetSessionID()
 
 	formData := url.Values{}
 	formData.Set("sessionid", sessionID)
@@ -413,9 +411,7 @@ func (c *Client) CancelBuyOrder(buyOrderID string) error {
 func (c *Client) CancelBuyOrderWithContext(ctx context.Context, buyOrderID string) error {
 	cancelURL := "https://steamcommunity.com/market/cancelbuyorder/"
 
-	c.mu.RLock()
-	sessionID := c.SessionID
-	c.mu.RUnlock()
+	sessionID := c.GetSessionID()
 
 	formData := url.Values{}
 	formData.Set("sessionid", sessionID)

@@ -123,6 +123,16 @@ func accountIDToSteamID64(accountID uint32) string {
 	return strconv.FormatUint(steamID64Base+uint64(accountID), 10)
 }
 
+// SteamID64ToAccountID converts a 64-bit SteamID string into a 32-bit AccountID uint32.
+func SteamID64ToAccountID(steamID64 string) uint32 {
+	const steamID64Base = 76561197960265728
+	val, err := strconv.ParseUint(steamID64, 10, 64)
+	if err != nil || val <= steamID64Base {
+		return 0
+	}
+	return uint32(val - steamID64Base)
+}
+
 // ParseTradeURL parses a Steam trade offer link into partner SteamID64 and token.
 func ParseTradeURL(tradeURL string) (string, string, error) {
 	u, err := url.Parse(tradeURL)
@@ -161,6 +171,11 @@ func (c *Client) newRequestWithContext(ctx context.Context, method, reqURL strin
 		return nil, err
 	}
 	req.Header.Set("User-Agent", defaultUserAgent)
+	req.Header.Set("Connection", "keep-alive")
+	if req.URL != nil && req.URL.Host != "" {
+		req.Header.Set("Host", req.URL.Host)
+		req.Host = req.URL.Host
+	}
 	if referer != "" {
 		req.Header.Set("Referer", referer)
 	}
@@ -189,11 +204,22 @@ func (c *Client) newAjaxPostRequestWithContext(ctx context.Context, reqURL strin
 }
 
 // doRequestWithRetry executes an HTTP request, automatically retrying transient errors (429, 502, 503, 504) with exponential backoff.
+//
+// Cookie handling strategy:
+//   - http.Client.Jar automatically applies cookies from the jar for the request URL
+//     and stores Set-Cookie responses — this is the primary mechanism.
+//   - We manually add steamLoginSecure/sessionid only for the steamcommunity.com origin,
+//     since that is the referer origin for most Steam API calls.
+//   - We do NOT propagate sessionid across domains: each Steam subdomain receives its own
+//     sessionid via Set-Cookie from /login/settoken (as observed in browser HAR recordings).
 func (c *Client) doRequestWithRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
+	// Only inject cookies for the community domain origin where we track session state.
+	// For all other domains (store, help, checkout, steam.tv) the http.Client Jar handles
+	// cookies automatically from the Set-Cookie responses of /login/settoken.
 	if req != nil && req.URL != nil {
 		c.ensureSessionCookiesForURL(req.URL)
 	}
@@ -236,6 +262,14 @@ func (c *Client) doRequestWithRetry(ctx context.Context, req *http.Request) (*ht
 	return nil, fmt.Errorf("request failed after retries")
 }
 
+// ensureSessionCookiesForURL injects steamcommunity.com session cookies (sessionid,
+// steamLoginSecure) into the jar for the given URL **only when they are missing**.
+//
+// Important: sessionid is ONLY propagated to the steamcommunity.com origin.
+// Other Steam subdomains (store, help, checkout, steam.tv) each receive their own
+// domain-specific sessionid via Set-Cookie from /login/settoken responses, which
+// the http.Client Jar stores automatically. We must not overwrite those with the
+// community sessionid, as that would break per-domain authentication.
 func (c *Client) ensureSessionCookiesForURL(u *url.URL) {
 	if u == nil || c.Jar == nil {
 		return
@@ -248,6 +282,8 @@ func (c *Client) ensureSessionCookiesForURL(u *url.URL) {
 	if sessionID == "" && steamLoginSecure == "" {
 		return
 	}
+
+	isCommunity := strings.Contains(u.Host, "steamcommunity.com")
 
 	cookies := c.Jar.Cookies(u)
 	hasSessionID := false
@@ -262,7 +298,10 @@ func (c *Client) ensureSessionCookiesForURL(u *url.URL) {
 		}
 	}
 
-	if !hasSessionID && sessionID != "" {
+	// sessionid is typically organically fetched by InitSession.
+	// We only sync the primary SessionID to steamcommunity.com if it's missing in the jar
+	// (e.g. for legacy tests or manually constructed clients).
+	if !hasSessionID && sessionID != "" && isCommunity {
 		c.Jar.SetCookies(u, []*http.Cookie{{Name: "sessionid", Value: sessionID, Path: "/"}})
 	}
 	if !hasSteamLogin && steamLoginSecure != "" {

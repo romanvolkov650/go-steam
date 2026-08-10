@@ -55,8 +55,8 @@ type TradeOfferService interface {
 	CancelTradeOffer(tradeOfferID string) error
 	CancelTradeOfferWithContext(ctx context.Context, tradeOfferID string) error
 
-	SendTradeOffer(partnerSteamID string, itemsToGive, itemsToReceive []TradeItem, message string, tradeToken ...string) (string, bool, error)
-	SendTradeOfferWithContext(ctx context.Context, partnerSteamID string, itemsToGive, itemsToReceive []TradeItem, message string, tradeToken ...string) (string, bool, error)
+	SendTradeOffer(tradeURL string, itemsToGive, itemsToReceive []TradeItem, message string) (string, bool, error)
+	SendTradeOfferWithContext(ctx context.Context, tradeURL string, itemsToGive, itemsToReceive []TradeItem, message string) (string, bool, error)
 
 	AcceptTradeOfferConfirmation(tradeOfferID string) error
 	AcceptTradeOfferConfirmationWithContext(ctx context.Context, tradeOfferID string) error

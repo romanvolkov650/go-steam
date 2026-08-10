@@ -40,6 +40,7 @@ type TradeItem struct {
 	InstanceID string `json:"instanceid,omitempty"`
 	Name       string `json:"name,omitempty"`
 	IconURL    string `json:"icon_url,omitempty"`
+	Tradable   bool   `json:"tradable"`
 }
 
 // TradeOffer represents a Steam trade offer.
@@ -129,12 +130,13 @@ func (a *econAsset) UnmarshalJSON(data []byte) error {
 }
 
 type econItemDescription struct {
-	AppID      int    `json:"appid"`
-	ClassID    string `json:"classid"`
-	InstanceID string `json:"instanceid"`
-	MarketName string `json:"market_name"`
-	Name       string `json:"name"`
-	IconURL    string `json:"icon_url"`
+	AppID      int          `json:"appid"`
+	ClassID    string       `json:"classid"`
+	InstanceID string       `json:"instanceid"`
+	MarketName string       `json:"market_name"`
+	Name       string       `json:"name"`
+	IconURL    string       `json:"icon_url"`
+	Tradable   FlexibleBool `json:"tradable"`
 }
 
 func (d *econItemDescription) UnmarshalJSON(data []byte) error {
@@ -156,8 +158,6 @@ func (d *econItemDescription) UnmarshalJSON(data []byte) error {
 	}
 	return nil
 }
-
-
 
 // GetTradeOffers fetches sent and/or received trade offers.
 func (c *Client) GetTradeOffers(opts GetTradeOffersOptions) ([]*TradeOffer, error) {
@@ -256,6 +256,7 @@ func applyItemDescription(item *TradeItem, d econItemDescription) {
 		item.Name = d.Name
 	}
 	item.IconURL = d.IconURL
+	item.Tradable = bool(d.Tradable)
 }
 
 func parseEconOffer(o econTradeOffer, isSent bool, descMap map[string]econItemDescription) *TradeOffer {
@@ -396,8 +397,6 @@ func parseTradeOffersHTML(bodyStr string, isSent bool) []*TradeOffer {
 	return offers
 }
 
-
-
 // GetUserInventory fetches full list of inventory items for specified appID and contextID for the current client account.
 func (c *Client) GetUserInventory(appID, contextID string) ([]TradeItem, error) {
 	return c.GetUserInventoryWithContext(context.Background(), appID, contextID)
@@ -408,7 +407,6 @@ func (c *Client) GetUserInventoryWithContext(ctx context.Context, appID, context
 	c.mu.RLock()
 	steamID := c.Config.SteamID
 	c.mu.RUnlock()
-
 	return c.GetPartnerInventoryWithContext(ctx, steamID, appID, contextID)
 }
 
@@ -472,7 +470,10 @@ func (c *Client) GetPartnerInventoryWithContext(ctx context.Context, steamID, ap
 	}
 
 	var inventoryResp struct {
-		Assets []struct {
+		Success    FlexibleBool `json:"success"`
+		Error      string       `json:"error"`
+		TotalCount int          `json:"total_inventory_count"`
+		Assets     []struct {
 			AppID      int    `json:"appid"`
 			ContextID  string `json:"contextid"`
 			AssetID    string `json:"assetid"`
@@ -484,7 +485,15 @@ func (c *Client) GetPartnerInventoryWithContext(ctx context.Context, steamID, ap
 	}
 
 	if err := json.Unmarshal(bodyBytes, &inventoryResp); err != nil {
-		return nil, err
+		snippet := string(bodyBytes)
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return nil, fmt.Errorf("failed to parse Steam inventory JSON for %s: %w (response snippet: %s)", steamID, err, snippet)
+	}
+
+	if inventoryResp.Error != "" {
+		return nil, fmt.Errorf("steam inventory error for %s: %s", steamID, inventoryResp.Error)
 	}
 
 	descMap := make(map[string]econItemDescription)
@@ -516,7 +525,6 @@ func (c *Client) GetPartnerInventoryWithContext(ctx context.Context, steamID, ap
 
 	return items, nil
 }
-
 
 // GetTradeOffer fetches details for a specific trade offer ID.
 func (c *Client) GetTradeOffer(tradeOfferID string, opts ...GetTradeOffersOptions) (*TradeOffer, error) {
@@ -612,9 +620,7 @@ func (c *Client) AcceptTradeOffer(tradeOfferID string, partnerSteamID ...string)
 
 // AcceptTradeOfferWithContext accepts an incoming trade offer with context support.
 func (c *Client) AcceptTradeOfferWithContext(ctx context.Context, tradeOfferID string, partnerSteamID ...string) error {
-	c.mu.RLock()
-	sessionID := c.SessionID
-	c.mu.RUnlock()
+	sessionID := c.GetSessionID()
 
 	partnerID := ""
 	if len(partnerSteamID) > 0 && partnerSteamID[0] != "" {
@@ -676,9 +682,7 @@ func (c *Client) DeclineTradeOffer(tradeOfferID string) error {
 
 // DeclineTradeOfferWithContext declines an incoming trade offer with context support.
 func (c *Client) DeclineTradeOfferWithContext(ctx context.Context, tradeOfferID string) error {
-	c.mu.RLock()
-	sessionID := c.SessionID
-	c.mu.RUnlock()
+	sessionID := c.GetSessionID()
 
 	declineURL := fmt.Sprintf("https://steamcommunity.com/tradeoffer/%s/decline", tradeOfferID)
 	formData := url.Values{}
@@ -713,9 +717,7 @@ func (c *Client) CancelTradeOffer(tradeOfferID string) error {
 
 // CancelTradeOfferWithContext cancels an outgoing (sent) trade offer with context support.
 func (c *Client) CancelTradeOfferWithContext(ctx context.Context, tradeOfferID string) error {
-	c.mu.RLock()
-	sessionID := c.SessionID
-	c.mu.RUnlock()
+	sessionID := c.GetSessionID()
 
 	cancelURL := fmt.Sprintf("https://steamcommunity.com/tradeoffer/%s/cancel", tradeOfferID)
 	formData := url.Values{}
@@ -743,18 +745,21 @@ func (c *Client) CancelTradeOfferWithContext(ctx context.Context, tradeOfferID s
 	return nil
 }
 
-// SendTradeOffer creates and sends a trade offer to partnerSteamID.
-func (c *Client) SendTradeOffer(partnerSteamID string, itemsToGive, itemsToReceive []TradeItem, message string, tradeToken ...string) (string, bool, error) {
-	return c.SendTradeOfferWithContext(context.Background(), partnerSteamID, itemsToGive, itemsToReceive, message, tradeToken...)
+// SendTradeOffer creates and sends a trade offer to specified tradeURL.
+func (c *Client) SendTradeOffer(tradeURL string, itemsToGive, itemsToReceive []TradeItem, message string) (string, bool, error) {
+	return c.SendTradeOfferWithContext(context.Background(), tradeURL, itemsToGive, itemsToReceive, message)
 }
 
-// SendTradeOfferWithContext creates and sends a trade offer to partnerSteamID with context support.
-func (c *Client) SendTradeOfferWithContext(ctx context.Context, partnerSteamID string, itemsToGive, itemsToReceive []TradeItem, message string, tradeToken ...string) (string, bool, error) {
+// SendTradeOfferWithContext creates and sends a trade offer to specified tradeURL with context support.
+func (c *Client) SendTradeOfferWithContext(ctx context.Context, tradeURL string, itemsToGive, itemsToReceive []TradeItem, message string) (string, bool, error) {
 	sendURL := "https://steamcommunity.com/tradeoffer/new/send"
 
-	c.mu.RLock()
-	sessionID := c.SessionID
-	c.mu.RUnlock()
+	sessionID := c.GetSessionID()
+
+	partnerSteamID, tradeToken, err := ParseTradeURL(tradeURL)
+	if err != nil {
+		return "", false, fmt.Errorf("invalid trade URL '%s': %w", tradeURL, err)
+	}
 
 	type tradeAsset struct {
 		AppID     string `json:"appid"`
@@ -844,8 +849,8 @@ func (c *Client) SendTradeOfferWithContext(ctx context.Context, partnerSteamID s
 	}
 
 	paramsPayload := make(map[string]interface{})
-	if len(tradeToken) > 0 && tradeToken[0] != "" {
-		paramsPayload["trade_offer_access_token"] = tradeToken[0]
+	if tradeToken != "" {
+		paramsPayload["trade_offer_access_token"] = tradeToken
 	}
 
 	jsonParamsBytes, _ := json.Marshal(paramsPayload)
@@ -859,7 +864,15 @@ func (c *Client) SendTradeOfferWithContext(ctx context.Context, partnerSteamID s
 	formData.Set("captcha", "")
 	formData.Set("trade_offer_create_params", string(jsonParamsBytes))
 
-	req, err := c.newAjaxPostRequestWithContext(ctx, sendURL, formData, "https://steamcommunity.com/tradeoffer/new/")
+	refererURL := "https://steamcommunity.com/tradeoffer/new/"
+	if tradeToken != "" {
+		accID := SteamID64ToAccountID(partnerSteamID)
+		if accID > 0 {
+			refererURL = fmt.Sprintf("https://steamcommunity.com/tradeoffer/new/?partner=%d&token=%s", accID, tradeToken)
+		}
+	}
+
+	req, err := c.newAjaxPostRequestWithContext(ctx, sendURL, formData, refererURL)
 	if err != nil {
 		return "", false, err
 	}
@@ -873,6 +886,33 @@ func (c *Client) SendTradeOfferWithContext(ctx context.Context, partnerSteamID s
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", false, err
+	}
+
+	// Handle 401 / 403 Unauthorized by attempting a fresh login and retrying once
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		c.mu.RLock()
+		hasCreds := c.Config.Password != "" || c.Config.RefreshToken != ""
+		c.mu.RUnlock()
+
+		if hasCreds {
+			if loginErr := c.LoginWithContext(ctx); loginErr == nil {
+				newSessionID := c.GetSessionID()
+
+				formData.Set("sessionid", newSessionID)
+				retryReq, retryErr := c.newAjaxPostRequestWithContext(ctx, sendURL, formData, refererURL)
+				if retryErr == nil {
+					retryResp, retryDoErr := c.doRequestWithRetry(ctx, retryReq)
+					if retryDoErr == nil {
+						defer retryResp.Body.Close()
+						if retryResp.StatusCode == http.StatusOK {
+							b, _ := io.ReadAll(retryResp.Body)
+							bodyBytes = b
+							resp.StatusCode = http.StatusOK
+						}
+					}
+				}
+			}
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
