@@ -156,28 +156,60 @@ func ParseTradeURL(tradeURL string) (string, string, error) {
 	return partner64, token, nil
 }
 
-func setBrowserHeaders(req *http.Request, isAjax bool) {
+type ReqType int
+
+const (
+	ReqTypeNavigate ReqType = iota
+	ReqTypeAjaxXHR
+	ReqTypeFetch
+)
+
+func setBrowserHeaders(req *http.Request, reqType ReqType) {
 	req.Header.Set("User-Agent", defaultUserAgent)
 	req.Header.Set("sec-ch-ua", `"Not(A:Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"`)
 	req.Header.Set("sec-ch-ua-mobile", "?0")
 	req.Header.Set("sec-ch-ua-platform", `"macOS"`)
 	req.Header.Set("accept-language", "en-US,en;q=0.9,ru;q=0.8")
 	req.Header.Set("accept-encoding", "gzip, deflate, br")
-	req.Header.Set("sec-fetch-user", "?1")
 
-	if isAjax {
+	// Determine sec-fetch-site based on URL and Referer
+	secFetchSite := "none"
+	referer := req.Header.Get("Referer")
+	if referer != "" && req.URL != nil {
+		refURL, err := url.Parse(referer)
+		if err == nil {
+			if refURL.Host == req.URL.Host {
+				secFetchSite = "same-origin"
+			} else {
+				if strings.HasSuffix(refURL.Host, "steampowered.com") && strings.HasSuffix(req.URL.Host, "steampowered.com") {
+					secFetchSite = "same-site"
+				} else if strings.HasSuffix(refURL.Host, "steamcommunity.com") && strings.HasSuffix(req.URL.Host, "steamcommunity.com") {
+					secFetchSite = "same-site"
+				} else {
+					secFetchSite = "cross-site"
+				}
+			}
+		}
+	}
+	req.Header.Set("sec-fetch-site", secFetchSite)
+
+	switch reqType {
+	case ReqTypeNavigate:
+		req.Header.Set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+		req.Header.Set("upgrade-insecure-requests", "1")
+		req.Header.Set("sec-fetch-mode", "navigate")
+		req.Header.Set("sec-fetch-dest", "document")
+		req.Header.Set("sec-fetch-user", "?1")
+	case ReqTypeAjaxXHR:
 		req.Header.Set("accept", "*/*")
-		req.Header.Set("sec-fetch-site", "same-origin")
 		req.Header.Set("sec-fetch-mode", "cors")
 		req.Header.Set("sec-fetch-dest", "empty")
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
 		req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	} else {
-		req.Header.Set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
-		req.Header.Set("upgrade-insecure-requests", "1")
-		req.Header.Set("sec-fetch-site", "none")
-		req.Header.Set("sec-fetch-mode", "navigate")
-		req.Header.Set("sec-fetch-dest", "document")
+	case ReqTypeFetch:
+		req.Header.Set("accept", "*/*")
+		req.Header.Set("sec-fetch-mode", "cors")
+		req.Header.Set("sec-fetch-dest", "empty")
 	}
 }
 
@@ -195,15 +227,14 @@ func (c *Client) newRequestWithContext(ctx context.Context, method, reqURL strin
 	if err != nil {
 		return nil, err
 	}
-	
-	setBrowserHeaders(req, false)
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
+	setBrowserHeaders(req, ReqTypeNavigate)
 	req.Header.Set("Connection", "keep-alive")
 	if req.URL != nil && req.URL.Host != "" {
 		req.Header.Set("Host", req.URL.Host)
 		req.Host = req.URL.Host
-	}
-	if referer != "" {
-		req.Header.Set("Referer", referer)
 	}
 	return req, nil
 }
@@ -223,9 +254,37 @@ func (c *Client) newAjaxPostRequestWithContext(ctx context.Context, reqURL strin
 	if err != nil {
 		return nil, err
 	}
-	
-	setBrowserHeaders(req, true)
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
+	setBrowserHeaders(req, ReqTypeAjaxXHR)
 	req.Header.Set("Origin", "https://steamcommunity.com")
+	req.Header.Set("Connection", "keep-alive")
+	if req.URL != nil && req.URL.Host != "" {
+		req.Header.Set("Host", req.URL.Host)
+		req.Host = req.URL.Host
+	}
+	return req, nil
+}
+
+// newFetchRequestWithContext creates an http.Request bound to ctx with standard modern Fetch API headers.
+func (c *Client) newFetchRequestWithContext(ctx context.Context, method, reqURL string, body io.Reader, referer string) (*http.Request, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
+	if err != nil {
+		return nil, err
+	}
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
+	setBrowserHeaders(req, ReqTypeFetch)
+	req.Header.Set("Connection", "keep-alive")
+	if req.URL != nil && req.URL.Host != "" {
+		req.Header.Set("Host", req.URL.Host)
+		req.Host = req.URL.Host
+	}
 	return req, nil
 }
 

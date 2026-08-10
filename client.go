@@ -505,7 +505,7 @@ func (c *Client) InitSession(ctx context.Context) error {
 	}
 
 	for _, d := range domains {
-		req, err := http.NewRequestWithContext(ctx, "GET", d, nil)
+		req, err := c.newRequestWithContext(ctx, "GET", d, nil, "")
 		if err != nil {
 			continue
 		}

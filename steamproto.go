@@ -197,7 +197,7 @@ func (c *Client) newMultipartProtoRequest(ctx context.Context, reqURL string, pb
 	}
 	w.Close()
 
-	req, err := c.newRequestWithContext(ctx, "POST", reqURL, strings.NewReader(buf.String()), referer)
+	req, err := c.newFetchRequestWithContext(ctx, "POST", reqURL, strings.NewReader(buf.String()), referer)
 	if err != nil {
 		return nil, err
 	}
