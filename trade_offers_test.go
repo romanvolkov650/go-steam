@@ -102,6 +102,9 @@ func TestAcceptDeclineCancelTradeOffers(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()
 		switch r.URL.Path {
+		case "/tradeoffer/1001/":
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte(`<html><body>var g_ulTradePartnerSteamID = '76561198000000000';</body></html>`))
 		case "/tradeoffer/1001/accept":
 			if r.FormValue("sessionid") != "test_session_id" {
 				t.Errorf("Expected sessionid 'test_session_id', got '%s'", r.FormValue("sessionid"))
@@ -137,7 +140,7 @@ func TestAcceptDeclineCancelTradeOffers(t *testing.T) {
 	client.SessionID = "test_session_id"
 	client.HTTPClient.Transport = &testTransport{serverURL: server.URL}
 
-	if err := client.AcceptTradeOffer("1001", "76561198000000000"); err != nil {
+	if err := client.AcceptTradeOffer("1001"); err != nil {
 		t.Fatalf("AcceptTradeOffer error: %v", err)
 	}
 

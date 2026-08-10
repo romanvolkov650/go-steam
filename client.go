@@ -59,6 +59,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 
 	reqClient := req.C().ImpersonateChrome()
+	reqClient.EnableInsecureSkipVerify()
 	if cfg.ProxyURL != "" {
 		reqClient.SetProxyURL(cfg.ProxyURL)
 	}

@@ -566,6 +566,10 @@ func (c *Client) GetTradeOfferWithContext(ctx context.Context, tradeOfferID stri
 	}
 	bodyStr := string(bodyBytes)
 
+	if strings.Contains(bodyStr, "You have logged in from a new device. In order to protect the items") {
+		return nil, fmt.Errorf("Account has logged in a new device and can't trade for 7 days")
+	}
+
 	// Extract partner Steam ID (User.steamid / partner_steamid / g_ulTradePartnerSteamID)
 	offer := &TradeOffer{
 		TradeOfferID: tradeOfferID,
@@ -575,30 +579,27 @@ func (c *Client) GetTradeOfferWithContext(ctx context.Context, tradeOfferID stri
 	rePartner := regexp.MustCompile(`g_ulTradePartnerSteamID\s*=\s*['"]?(\d+)['"]?`)
 	if m := rePartner.FindStringSubmatch(bodyStr); len(m) > 1 {
 		offer.PartnerSteamID = m[1]
+	} else {
+		return nil, fmt.Errorf("trade offer is not active or partner ID not found")
 	}
 
 	return offer, nil
 }
 
 // AcceptTradeOffer accepts an incoming trade offer.
-func (c *Client) AcceptTradeOffer(tradeOfferID string, partnerSteamID ...string) error {
-	return c.AcceptTradeOfferWithContext(context.Background(), tradeOfferID, partnerSteamID...)
+func (c *Client) AcceptTradeOffer(tradeOfferID string) error {
+	return c.AcceptTradeOfferWithContext(context.Background(), tradeOfferID)
 }
 
 // AcceptTradeOfferWithContext accepts an incoming trade offer with context support.
-func (c *Client) AcceptTradeOfferWithContext(ctx context.Context, tradeOfferID string, partnerSteamID ...string) error {
+func (c *Client) AcceptTradeOfferWithContext(ctx context.Context, tradeOfferID string) error {
 	sessionID := c.GetSessionID()
 
-	partnerID := ""
-	if len(partnerSteamID) > 0 && partnerSteamID[0] != "" {
-		partnerID = partnerSteamID[0]
-	} else {
-		offer, err := c.GetTradeOfferWithContext(ctx, tradeOfferID)
-		if err != nil || offer.PartnerSteamID == "" {
-			return fmt.Errorf("partner Steam ID is required to accept trade offer: %v", err)
-		}
-		partnerID = offer.PartnerSteamID
+	offer, err := c.GetTradeOfferWithContext(ctx, tradeOfferID)
+	if err != nil || offer.PartnerSteamID == "" {
+		return fmt.Errorf("failed to fetch trade partner ID: %v", err)
 	}
+	partnerID := offer.PartnerSteamID
 
 	acceptURL := fmt.Sprintf("https://steamcommunity.com/tradeoffer/%s/accept", tradeOfferID)
 	formData := url.Values{}
@@ -631,6 +632,12 @@ func (c *Client) AcceptTradeOfferWithContext(ctx context.Context, tradeOfferID s
 
 	if err := json.Unmarshal(bodyBytes, &acceptResp); err == nil && acceptResp.Error != "" {
 		return fmt.Errorf("steam trade accept error: %s", acceptResp.Error)
+	}
+
+	if acceptResp.NeedsMobileConfirmation {
+		if err := c.AcceptTradeOfferConfirmationWithContext(ctx, tradeOfferID); err != nil {
+			return fmt.Errorf("trade accepted but mobile confirmation failed: %w", err)
+		}
 	}
 
 	return nil

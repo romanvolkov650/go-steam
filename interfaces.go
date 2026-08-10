@@ -46,8 +46,8 @@ type TradeOfferService interface {
 	GetTradeOffer(tradeOfferID string, opts ...GetTradeOffersOptions) (*TradeOffer, error)
 	GetTradeOfferWithContext(ctx context.Context, tradeOfferID string, opts ...GetTradeOffersOptions) (*TradeOffer, error)
 
-	AcceptTradeOffer(tradeOfferID string, partnerSteamID ...string) error
-	AcceptTradeOfferWithContext(ctx context.Context, tradeOfferID string, partnerSteamID ...string) error
+	AcceptTradeOffer(tradeOfferID string) error
+	AcceptTradeOfferWithContext(ctx context.Context, tradeOfferID string) error
 
 	DeclineTradeOffer(tradeOfferID string) error
 	DeclineTradeOfferWithContext(ctx context.Context, tradeOfferID string) error
