@@ -52,5 +52,37 @@ func TestLiveAccount(t *testing.T) {
 	} else {
 		t.Logf("Успешно получено обменов: %d", len(offers))
 	}
+
+	// Verify SaveCookiesToFile and LoadCookiesFromFile
+	tmpCookiesFile := t.TempDir() + "/live_cookies.json"
+	if err := client.SaveCookiesToFile(tmpCookiesFile); err != nil {
+		t.Fatalf("Ошибка сохранения кук в файл: %v", err)
+	}
+	t.Logf("Успешно сохранены куки в %s", tmpCookiesFile)
+
+	newClient, err := NewClient(ClientConfig{
+		Username: username,
+		ProxyURL: proxyURL,
+	})
+	if err != nil {
+		t.Fatalf("Ошибка создания нового клиента для проверки кук: %v", err)
+	}
+
+	if err := newClient.LoadCookiesFromFile(tmpCookiesFile); err != nil {
+		t.Fatalf("Ошибка загрузки кук из файла: %v", err)
+	}
+	t.Logf("Успешно загружены куки из файла")
+
+	// Verify the new client is logged in and can fetch status using loaded cookies
+	newStatus, err := newClient.GetAccountStatus()
+	if err != nil {
+		t.Fatalf("Ошибка получения статуса с загруженными куками: %v", err)
+	}
+
+	if newStatus.WalletBalance != status.WalletBalance {
+		t.Errorf("Несовпадение баланса: %s (оригинал) vs %s (с куками из файла)", status.WalletBalance, newStatus.WalletBalance)
+	} else {
+		t.Logf("Баланс с загруженными куками совпадает: %s", newStatus.WalletBalance)
+	}
 }
 

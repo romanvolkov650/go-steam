@@ -27,3 +27,8 @@ coverage.txt
 cookies*.json
 *.maFile
 *.log
+live_config.json
+test_account.json
+*.secret.json
+*.secret.go
+live_secrets.go
