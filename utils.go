@@ -156,6 +156,31 @@ func ParseTradeURL(tradeURL string) (string, string, error) {
 	return partner64, token, nil
 }
 
+func setBrowserHeaders(req *http.Request, isAjax bool) {
+	req.Header.Set("User-Agent", defaultUserAgent)
+	req.Header.Set("sec-ch-ua", `"Not(A:Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"`)
+	req.Header.Set("sec-ch-ua-mobile", "?0")
+	req.Header.Set("sec-ch-ua-platform", `"macOS"`)
+	req.Header.Set("accept-language", "en-US,en;q=0.9,ru;q=0.8")
+	req.Header.Set("accept-encoding", "gzip, deflate, br")
+	req.Header.Set("sec-fetch-user", "?1")
+
+	if isAjax {
+		req.Header.Set("accept", "*/*")
+		req.Header.Set("sec-fetch-site", "same-origin")
+		req.Header.Set("sec-fetch-mode", "cors")
+		req.Header.Set("sec-fetch-dest", "empty")
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	} else {
+		req.Header.Set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+		req.Header.Set("upgrade-insecure-requests", "1")
+		req.Header.Set("sec-fetch-site", "none")
+		req.Header.Set("sec-fetch-mode", "navigate")
+		req.Header.Set("sec-fetch-dest", "document")
+	}
+}
+
 // newRequest creates an http.Request with common headers attached.
 func (c *Client) newRequest(method, reqURL string, body io.Reader, referer string) (*http.Request, error) {
 	return c.newRequestWithContext(context.Background(), method, reqURL, body, referer)
@@ -170,7 +195,8 @@ func (c *Client) newRequestWithContext(ctx context.Context, method, reqURL strin
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", defaultUserAgent)
+	
+	setBrowserHeaders(req, false)
 	req.Header.Set("Connection", "keep-alive")
 	if req.URL != nil && req.URL.Host != "" {
 		req.Header.Set("Host", req.URL.Host)
@@ -197,9 +223,9 @@ func (c *Client) newAjaxPostRequestWithContext(ctx context.Context, reqURL strin
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+	
+	setBrowserHeaders(req, true)
 	req.Header.Set("Origin", "https://steamcommunity.com")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	return req, nil
 }
 

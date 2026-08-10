@@ -13,10 +13,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/imroc/req/v3"
 )
 
 const (
-	defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+	defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 )
 
 // ClientConfig holds explicit credentials and parameters needed to instantiate a Steam client.
@@ -56,22 +58,13 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, fmt.Errorf("failed to create cookie jar: %w", err)
 	}
 
-	transport := &http.Transport{
-		MaxIdleConns:        100,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
-	}
-
+	reqClient := req.C().ImpersonateChrome()
 	if cfg.ProxyURL != "" {
-		parsedProxy, err := url.Parse(cfg.ProxyURL)
-		if err != nil {
-			return nil, fmt.Errorf("invalid proxy URL '%s': %w", cfg.ProxyURL, err)
-		}
-		transport.Proxy = http.ProxyURL(parsedProxy)
+		reqClient.SetProxyURL(cfg.ProxyURL)
 	}
 
 	httpClient := &http.Client{
-		Transport: transport,
+		Transport: reqClient.GetTransport(),
 		Jar:       jar,
 		Timeout:   30 * time.Second,
 	}
