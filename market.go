@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -36,10 +35,7 @@ type MarketListing struct {
 	Name        string `json:"name"`
 	Price       string `json:"price"`
 	TimeCreated int64  `json:"time_created"`
-	IconURL     string `json:"icon_url,omitempty"`
 }
-
-
 
 // CreateSellOrderResponse represents the response when creating a sell listing.
 type CreateSellOrderResponse struct {
@@ -61,7 +57,7 @@ func (c *Client) FetchMarketPriceWithContext(ctx context.Context, appID int, mar
 	c.mu.RUnlock()
 
 	if walletCurrency <= 0 && (len(currency) == 0 || currency[0] <= 0) {
-		_, _ = c.fetchWalletBalanceWithContext(ctx)
+		_, _, _, _ = c.fetchWalletBalanceWithContext(ctx)
 		c.mu.RLock()
 		walletCurrency = c.WalletCurrency
 		c.mu.RUnlock()
@@ -83,19 +79,17 @@ func (c *Client) FetchMarketPriceWithContext(ctx context.Context, appID int, mar
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("market price request failed: %w", err)
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, &SteamAPIError{StatusCode: resp.StatusCode, Message: string(body)}
+		return nil, &SteamAPIError{StatusCode: resp.StatusCode, Message: string(bodyBytes)}
 	}
 
 	var overview MarketPriceOverview
-	if err := json.NewDecoder(resp.Body).Decode(&overview); err != nil {
+	if err := json.Unmarshal(bodyBytes, &overview); err != nil {
 		return nil, fmt.Errorf("failed to decode price overview response: %w", err)
 	}
 
@@ -117,15 +111,13 @@ func (c *Client) GetMarketPriceHistoryWithContext(ctx context.Context, appID int
 		return nil, err
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, &SteamAPIError{StatusCode: resp.StatusCode, Message: string(body)}
+		return nil, &SteamAPIError{StatusCode: resp.StatusCode, Message: string(bodyBytes)}
 	}
 
 	var historyResp struct {
@@ -133,7 +125,7 @@ func (c *Client) GetMarketPriceHistoryWithContext(ctx context.Context, appID int
 		Prices  [][]interface{} `json:"prices"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&historyResp); err != nil {
+	if err := json.Unmarshal(bodyBytes, &historyResp); err != nil {
 		return nil, err
 	}
 
@@ -184,15 +176,9 @@ func (c *Client) CreateSellOrderWithContext(ctx context.Context, assetID string,
 		return nil, err
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute sell order request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -285,15 +271,9 @@ func (c *Client) createBuyOrderInternalWithContext(ctx context.Context, appID in
 		return nil, err
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute create buy order request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
 	}
 
 	var rawResp struct {
@@ -377,15 +357,9 @@ func (c *Client) CancelSellOrderWithContext(ctx context.Context, listingID strin
 		return err
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return fmt.Errorf("failed to execute cancel sell order request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read cancel sell order response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return &SteamAPIError{StatusCode: resp.StatusCode, Message: string(bodyBytes)}
@@ -423,15 +397,9 @@ func (c *Client) CancelBuyOrderWithContext(ctx context.Context, buyOrderID strin
 		return err
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return fmt.Errorf("failed to execute cancel buy order request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read cancel buy order response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return &SteamAPIError{StatusCode: resp.StatusCode, Message: string(bodyBytes)}
@@ -469,13 +437,7 @@ func (c *Client) fetchMyListingsRenderWithContext(ctx context.Context) (*myListi
 	}
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 
-	resp, err := c.doRequestWithRetry(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, _, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return nil, err
 	}

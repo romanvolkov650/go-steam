@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -216,19 +215,17 @@ func (c *Client) getTradeOffersViaAPIWithContext(ctx context.Context, opts GetTr
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute IEconService request: %w", err)
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, &SteamAPIError{StatusCode: resp.StatusCode, Message: string(body)}
+		return nil, &SteamAPIError{StatusCode: resp.StatusCode, Message: string(bodyBytes)}
 	}
 
 	var econResp econServiceOffersResponse
-	if err := json.NewDecoder(resp.Body).Decode(&econResp); err != nil {
+	if err := json.Unmarshal(bodyBytes, &econResp); err != nil {
 		return nil, fmt.Errorf("failed to decode IEconService response: %w", err)
 	}
 
@@ -259,42 +256,28 @@ func applyItemDescription(item *TradeItem, d econItemDescription) {
 	item.Tradable = bool(d.Tradable)
 }
 
+func convertEconAssetsToTradeItems(assets []econAsset, descMap map[string]econItemDescription) []TradeItem {
+	items := make([]TradeItem, 0, len(assets))
+	for _, a := range assets {
+		item := TradeItem{
+			AssetID:    a.AssetID,
+			AppID:      a.AppID,
+			ContextID:  a.ContextID,
+			Amount:     a.Amount,
+			ClassID:    a.ClassID,
+			InstanceID: a.InstanceID,
+		}
+		key := fmt.Sprintf("%d_%s_%s", a.AppID, a.ClassID, a.InstanceID)
+		if d, ok := descMap[key]; ok {
+			applyItemDescription(&item, d)
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
 func parseEconOffer(o econTradeOffer, isSent bool, descMap map[string]econItemDescription) *TradeOffer {
 	partnerSteamID := accountIDToSteamID64(o.AccountIDOther)
-
-	itemsToGive := make([]TradeItem, 0, len(o.ItemsToGive))
-	for _, a := range o.ItemsToGive {
-		item := TradeItem{
-			AssetID:    a.AssetID,
-			AppID:      a.AppID,
-			ContextID:  a.ContextID,
-			Amount:     a.Amount,
-			ClassID:    a.ClassID,
-			InstanceID: a.InstanceID,
-		}
-		key := fmt.Sprintf("%d_%s_%s", a.AppID, a.ClassID, a.InstanceID)
-		if d, ok := descMap[key]; ok {
-			applyItemDescription(&item, d)
-		}
-		itemsToGive = append(itemsToGive, item)
-	}
-
-	itemsToReceive := make([]TradeItem, 0, len(o.ItemsToReceive))
-	for _, a := range o.ItemsToReceive {
-		item := TradeItem{
-			AssetID:    a.AssetID,
-			AppID:      a.AppID,
-			ContextID:  a.ContextID,
-			Amount:     a.Amount,
-			ClassID:    a.ClassID,
-			InstanceID: a.InstanceID,
-		}
-		key := fmt.Sprintf("%d_%s_%s", a.AppID, a.ClassID, a.InstanceID)
-		if d, ok := descMap[key]; ok {
-			applyItemDescription(&item, d)
-		}
-		itemsToReceive = append(itemsToReceive, item)
-	}
 
 	return &TradeOffer{
 		TradeOfferID:   o.TradeOfferID,
@@ -303,8 +286,8 @@ func parseEconOffer(o econTradeOffer, isSent bool, descMap map[string]econItemDe
 		State:          o.TradeOfferState,
 		IsSent:         isSent,
 		IsOurOffer:     o.IsOurOffer,
-		ItemsToGive:    itemsToGive,
-		ItemsToReceive: itemsToReceive,
+		ItemsToGive:    convertEconAssetsToTradeItems(o.ItemsToGive, descMap),
+		ItemsToReceive: convertEconAssetsToTradeItems(o.ItemsToReceive, descMap),
 		TimeCreated:    o.TimeCreated,
 		TimeUpdated:    o.TimeUpdated,
 		TimeExpiration: o.ExpirationTime,
@@ -346,13 +329,7 @@ func (c *Client) fetchWebTradeOffersPageWithContext(ctx context.Context, pageURL
 		return nil, err
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, _, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -448,8 +425,7 @@ func (c *Client) GetPartnerInventoryWithContext(ctx context.Context, steamID, ap
 			continue
 		}
 
-		b, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		b, readErr := readResponseBody(resp)
 
 		if readErr != nil {
 			lastErr = readErr
@@ -561,20 +537,17 @@ func (c *Client) GetTradeOfferWithContext(ctx context.Context, tradeOfferID stri
 
 		req, err := c.newRequestWithContext(ctx, "GET", reqURL+values.Encode(), nil, "")
 		if err == nil {
-			resp, err := c.doRequestWithRetry(ctx, req)
-			if err == nil {
-				defer resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					var singleResp econSingleOfferResponse
-					if err := json.NewDecoder(resp.Body).Decode(&singleResp); err == nil && singleResp.Response.Offer.TradeOfferID != "" {
-						descMap := make(map[string]econItemDescription)
-						for _, d := range singleResp.Response.Descriptions {
-							key := fmt.Sprintf("%d_%s_%s", d.AppID, d.ClassID, d.InstanceID)
-							descMap[key] = d
-						}
-						isSent := singleResp.Response.Offer.IsOurOffer
-						return parseEconOffer(singleResp.Response.Offer, isSent, descMap), nil
+			bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
+			if err == nil && resp.StatusCode == http.StatusOK {
+				var singleResp econSingleOfferResponse
+				if err := json.Unmarshal(bodyBytes, &singleResp); err == nil && singleResp.Response.Offer.TradeOfferID != "" {
+					descMap := make(map[string]econItemDescription)
+					for _, d := range singleResp.Response.Descriptions {
+						key := fmt.Sprintf("%d_%s_%s", d.AppID, d.ClassID, d.InstanceID)
+						descMap[key] = d
 					}
+					isSent := singleResp.Response.Offer.IsOurOffer
+					return parseEconOffer(singleResp.Response.Offer, isSent, descMap), nil
 				}
 			}
 		}
@@ -587,13 +560,7 @@ func (c *Client) GetTradeOfferWithContext(ctx context.Context, tradeOfferID stri
 		return nil, err
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, _, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -646,15 +613,9 @@ func (c *Client) AcceptTradeOfferWithContext(ctx context.Context, tradeOfferID s
 		return err
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return fmt.Errorf("failed to execute accept trade offer request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -693,15 +654,9 @@ func (c *Client) DeclineTradeOfferWithContext(ctx context.Context, tradeOfferID 
 		return err
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return fmt.Errorf("failed to execute decline request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read decline response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return &SteamAPIError{StatusCode: resp.StatusCode, Message: string(bodyBytes)}
@@ -728,15 +683,9 @@ func (c *Client) CancelTradeOfferWithContext(ctx context.Context, tradeOfferID s
 		return err
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return fmt.Errorf("failed to execute cancel request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read cancel request response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return &SteamAPIError{StatusCode: resp.StatusCode, Message: string(bodyBytes)}
@@ -877,15 +826,9 @@ func (c *Client) SendTradeOfferWithContext(ctx context.Context, tradeURL string,
 		return "", false, err
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to send trade offer: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", false, err
 	}
 
 	// Handle 401 / 403 Unauthorized by attempting a fresh login and retrying once
@@ -903,9 +846,8 @@ func (c *Client) SendTradeOfferWithContext(ctx context.Context, tradeURL string,
 				if retryErr == nil {
 					retryResp, retryDoErr := c.doRequestWithRetry(ctx, retryReq)
 					if retryDoErr == nil {
-						defer retryResp.Body.Close()
 						if retryResp.StatusCode == http.StatusOK {
-							b, _ := io.ReadAll(retryResp.Body)
+							b, _ := readResponseBody(retryResp)
 							bodyBytes = b
 							resp.StatusCode = http.StatusOK
 						}

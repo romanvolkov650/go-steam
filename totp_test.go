@@ -37,3 +37,30 @@ func TestGenerateConfirmationHash(t *testing.T) {
 
 	t.Logf("Generated Confirmation Hash for tag '%s': %s", tag, hash)
 }
+
+func TestGenerateDeviceID(t *testing.T) {
+	steamID := "76561198000000000"
+	devID1 := GenerateDeviceID(steamID)
+	devID2 := GenerateDeviceID(steamID)
+
+	if devID1 != devID2 {
+		t.Errorf("expected deterministic device ID, got %s and %s", devID1, devID2)
+	}
+
+	if len(devID1) != 44 { // android:8-4-4-4-12 = 8 + 36 = 44
+		t.Errorf("expected device ID length 44, got %d (%s)", len(devID1), devID1)
+	}
+
+	client, err := NewClient(ClientConfig{SteamID: steamID, Username: "testuser"})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	gotID := client.getDeviceID()
+	if gotID != devID1 {
+		t.Errorf("expected client.getDeviceID() to match GenerateDeviceID, got %s vs %s", gotID, devID1)
+	}
+	if client.Config.DeviceID != devID1 {
+		t.Errorf("expected client.Config.DeviceID to be cached, got %s", client.Config.DeviceID)
+	}
+}

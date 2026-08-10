@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"html"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -14,32 +14,39 @@ import (
 )
 
 var (
-	reBalDirect     = regexp.MustCompile(`(?i)"wallet_balance"\s*:\s*"?(\d+)"?`)
-	reCurrDirect    = regexp.MustCompile(`(?i)"wallet_currency"\s*:\s*(\d+)`)
-	reTag           = regexp.MustCompile(`(?i)(?:id="header_wallet_balance"|class="[^"]*account_balance[^"]*")[^>]*>([\s\S]*?)</`)
-	reStripHTML     = regexp.MustCompile(`<[^>]*>`)
-	reTradeURL      = regexp.MustCompile(`id="trade_offer_access_url"[^>]*value="([^"]+)"`)
-	reTradeURLAlt   = regexp.MustCompile(`https://steamcommunity\.com/tradeoffer/new/\?partner=\d+(?:&amp;|&)token=[a-zA-Z0-9_-]+`)
-	reTradeURLValue = regexp.MustCompile(`https:\\?/\\?/steamcommunity\.com\\?/tradeoffer\\?/new\\?/\?partner=\d+[^"'\s<]+`)
-	reAvatarInner   = regexp.MustCompile(`(?s)class=["'][^"']*(?:playerAvatarAutoSizeInner|playerAvatarHeading)[^"']*["'][^>]*>.*?<(?:img|source)[^>]+(?:src|srcset)=["'](https://[^"'\s>]+)["']`)
-	reAvatarImg     = regexp.MustCompile(`(?s)class=["'][^"']*playerAvatarAutoSizeInner[^"']*["'][^>]*>.*?<img[^>]+src=["'](https://[^"'\s>]+)["']`)
-	reConfID        = regexp.MustCompile(`data-confid="(\d+)"`)
-	reConfKey       = regexp.MustCompile(`data-key="(\d+)"`)
-	reConfCreator   = regexp.MustCompile(`data-creator="(\d+)"`)
+	reBalDirect       = regexp.MustCompile(`(?i)"wallet_balance"\s*:\s*"?(\d+)"?`)
+	reCurrDirect      = regexp.MustCompile(`(?i)"wallet_currency"\s*:\s*(\d+)`)
+	reTag             = regexp.MustCompile(`(?i)(?:id="header_wallet_balance"|class="[^"]*account_balance[^"]*")[^>]*>([\s\S]*?)</`)
+	reHeaderWalletA   = regexp.MustCompile(`(?i)id="header_wallet_balance"[^>]*>([\s\S]*?)</a>`)
+	reSpanPending     = regexp.MustCompile(`(?i)<span[^>]*data-tooltip-html="([^"]+)"[^>]*>([\s\S]*?)</span>`)
+	rePendingAvail    = regexp.MustCompile(`(?i)\((available in [^)]+)\)`)
+	rePendingAvailAlt = regexp.MustCompile(`(?i)\(([^)]+)\)`)
+	reSplitBrSpan     = regexp.MustCompile(`(?i)<br\s*/?>|<span`)
+	reStripHTML       = regexp.MustCompile(`<[^>]*>`)
+	reTradeURL        = regexp.MustCompile(`id="trade_offer_access_url"[^>]*value="([^"]+)"`)
+	reTradeURLAlt     = regexp.MustCompile(`https://steamcommunity\.com/tradeoffer/new/\?partner=\d+(?:&amp;|&)token=[a-zA-Z0-9_-]+`)
+	reTradeURLValue   = regexp.MustCompile(`https:\\?/\\?/steamcommunity\.com\\?/tradeoffer\\?/new\\?/\?partner=\d+[^"'\s<]+`)
+	reAvatarInner     = regexp.MustCompile(`(?s)class=["'][^"']*(?:playerAvatarAutoSizeInner|playerAvatarHeading)[^"']*["'][^>]*>.*?<(?:img|source)[^>]+(?:src|srcset)=["'](https://[^"'\s>]+)["']`)
+	reAvatarImg       = regexp.MustCompile(`(?s)class=["'][^"']*playerAvatarAutoSizeInner[^"']*["'][^>]*>.*?<img[^>]+src=["'](https://[^"'\s>]+)["']`)
+	reConfID          = regexp.MustCompile(`data-confid="(\d+)"`)
+	reConfKey         = regexp.MustCompile(`data-key="(\d+)"`)
+	reConfCreator     = regexp.MustCompile(`data-creator="(\d+)"`)
 )
 
 // AccountStatus holds fetched Steam account data (balance, inventories, bans).
 type AccountStatus struct {
-	SteamID        string `json:"steam_id"`
-	WalletBalance  string `json:"wallet_balance"` // e.g. "1250.50 RUB" or "$15.20"
-	CS2Count       int    `json:"cs2_count"`      // AppID 730
-	Dota2Count     int    `json:"dota2_count"`    // AppID 570
-	TF2Count       int    `json:"tf2_count"`      // AppID 440
-	IsVACBanned    bool   `json:"is_vac_banned"`
-	IsTradeBanned  bool   `json:"is_trade_banned"`
-	IsLimited      bool   `json:"is_limited"` // $5 limit
-	LastUpdated    int64  `json:"last_updated"`
-	ErrorMessage   string `json:"error_message,omitempty"`
+	SteamID             string `json:"steam_id"`
+	WalletBalance       string `json:"wallet_balance"`                 // e.g. "5 968,85₴" or "$15.20"
+	PendingBalance      string `json:"pending_balance,omitempty"`      // e.g. "440,52₴"
+	PendingAvailability string `json:"pending_availability,omitempty"` // e.g. "available in 1-2 days"
+	CS2Count            int    `json:"cs2_count"`                      // AppID 730
+	Dota2Count          int    `json:"dota2_count"`                    // AppID 570
+	TF2Count            int    `json:"tf2_count"`                      // AppID 440
+	IsVACBanned         bool   `json:"is_vac_banned"`
+	IsTradeBanned       bool   `json:"is_trade_banned"`
+	IsLimited           bool   `json:"is_limited"` // $5 limit
+	LastUpdated         int64  `json:"last_updated"`
+	ErrorMessage        string `json:"error_message,omitempty"`
 }
 
 // FullAccountDetails holds aggregated balance, avatar, and trade URL data for an account.
@@ -78,56 +85,54 @@ func (c *Client) GetAccountStatusWithContext(ctx context.Context) (*AccountStatu
 		LastUpdated: time.Now().Unix(),
 	}
 
-	// Fetch Wallet Balance
-	balance, err := c.fetchWalletBalanceWithContext(ctx)
-	if err == nil && balance != "" {
-		status.WalletBalance = balance
+	// Fetch Wallet Balance Details (Available balance, Pending balance, Pending availability)
+	bal, pendingBal, avail, err := c.fetchWalletBalanceWithContext(ctx)
+	if err == nil {
+		status.WalletBalance = bal
+		status.PendingBalance = pendingBal
+		status.PendingAvailability = avail
 	} else {
 		status.WalletBalance = "0.00"
 	}
 
+	// Fetch Inventory Counts for CS2 (730), Dota 2 (570), TF2 (440)
+	status.CS2Count = c.fetchInventoryItemCountWithContext(ctx, "730", "2")
+	status.Dota2Count = c.fetchInventoryItemCountWithContext(ctx, "570", "2")
+	status.TF2Count = c.fetchInventoryItemCountWithContext(ctx, "440", "2")
+
 	return status, nil
 }
 
-func (c *Client) fetchWalletBalance() (string, error) {
-	return c.fetchWalletBalanceWithContext(context.Background())
-}
 
-func getCurrencySymbol(currencyID int) string {
-	switch currencyID {
-	case 1:
-		return "$"
-	case 2:
-		return "£"
-	case 3:
-		return "€"
-	case 5:
-		return "₽"
-	case 18:
-		return "₴"
-	case 37:
-		return "₸"
-	case 23:
-		return "¥"
-	case 17:
-		return "TL"
-	case 34:
-		return "ARS$"
-	case 7:
-		return "R$"
-	case 8:
-		return "¥"
-	case 20:
-		return "CDN$"
-	case 21:
-		return "A$"
-	default:
-		return ""
+
+func extractWalletBalanceDetailsFromHTML(bodyStr string) (balance, pendingBalance, pendingAvailability string) {
+	if m := reHeaderWalletA.FindStringSubmatch(bodyStr); len(m) > 1 {
+		inner := m[1]
+
+		if spanMatch := reSpanPending.FindStringSubmatch(inner); len(spanMatch) > 2 {
+			tooltipAttr := html.UnescapeString(spanMatch[1])
+			spanText := strings.TrimSpace(reStripHTML.ReplaceAllString(spanMatch[2], ""))
+
+			pendingBalance = spanText
+			if strings.HasPrefix(strings.ToLower(pendingBalance), "pending:") {
+				pendingBalance = strings.TrimSpace(pendingBalance[8:])
+			}
+
+			if availMatch := rePendingAvail.FindStringSubmatch(tooltipAttr); len(availMatch) > 1 {
+				pendingAvailability = availMatch[1]
+			} else if availMatch := rePendingAvailAlt.FindStringSubmatch(tooltipAttr); len(availMatch) > 1 {
+				pendingAvailability = availMatch[1]
+			}
+		}
+
+		parts := reSplitBrSpan.Split(inner, 2)
+		balance = strings.TrimSpace(reStripHTML.ReplaceAllString(parts[0], ""))
+		if balance != "" {
+			return balance, pendingBalance, pendingAvailability
+		}
 	}
-}
 
-func extractBalanceFromHTML(bodyStr string) string {
-	// 1. Direct Regex for "wallet_balance": 1456 / "wallet_balance": "1456"
+	// Fallback 1: Direct Regex for "wallet_balance": 1456 / "wallet_balance": "1456"
 	if mBal := reBalDirect.FindStringSubmatch(bodyStr); len(mBal) > 1 {
 		rawAmount, err := strconv.ParseFloat(mBal[1], 64)
 		if err == nil {
@@ -138,55 +143,49 @@ func extractBalanceFromHTML(bodyStr string) string {
 			}
 			sym := getCurrencySymbol(currencyID)
 			if sym != "" {
-				return fmt.Sprintf("%s %s", amountStr, sym)
+				balance = fmt.Sprintf("%s %s", amountStr, sym)
+			} else {
+				balance = amountStr
 			}
-			return amountStr
+			return balance, pendingBalance, pendingAvailability
 		}
 	}
 
-	// 2. HTML Tag Regex for header_wallet_balance or account_balance
+	// Fallback 2: General tag regex for account_balance
 	if m := reTag.FindStringSubmatch(bodyStr); len(m) > 1 {
 		cleanText := strings.TrimSpace(reStripHTML.ReplaceAllString(m[1], ""))
 		if cleanText != "" {
-			return cleanText
+			balance = cleanText
+			return balance, pendingBalance, pendingAvailability
 		}
 	}
 
-	return ""
+	return "", "", ""
 }
 
-func (c *Client) fetchWalletBalanceWithContext(ctx context.Context) (string, error) {
-	// 1. Query store.steampowered.com/account/
+func extractBalanceFromHTML(bodyStr string) string {
+	bal, _, _ := extractWalletBalanceDetailsFromHTML(bodyStr)
+	return bal
+}
+
+func (c *Client) fetchWalletBalanceWithContext(ctx context.Context) (balance, pendingBalance, pendingAvailability string, err error) {
+	// Query ONLY store.steampowered.com/account/
 	reqAccount, err := c.newRequestWithContext(ctx, "GET", "https://store.steampowered.com/account/", nil, "https://store.steampowered.com/")
-	if err == nil {
-		reqAccount.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-		respAccount, err := c.doRequestWithRetry(ctx, reqAccount)
-		if err == nil {
-			bodyBytes, _ := io.ReadAll(respAccount.Body)
-			respAccount.Body.Close()
-			if val := extractBalanceFromHTML(string(bodyBytes)); val != "" {
-				return val, nil
-			}
-		}
+	if err != nil {
+		return "0.00", "", "", err
 	}
 
-	// 2. Query steamcommunity.com/market/
-	reqMarket, err := c.newRequestWithContext(ctx, "GET", "https://steamcommunity.com/market/", nil, "https://steamcommunity.com/")
-	if err == nil {
-		reqMarket.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-		reqMarket.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
-		respMarket, err := c.doRequestWithRetry(ctx, reqMarket)
-		if err == nil {
-			bodyBytes, _ := io.ReadAll(respMarket.Body)
-			respMarket.Body.Close()
-			if val := extractBalanceFromHTML(string(bodyBytes)); val != "" {
-				return val, nil
-			}
-		}
+	reqAccount.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	bodyBytes, _, err := c.doRequestAndRead(ctx, reqAccount)
+	if err != nil {
+		return "0.00", "", "", err
 	}
 
-	return "0.00", nil
+	bal, pendingBal, avail := extractWalletBalanceDetailsFromHTML(string(bodyBytes))
+	if bal == "" {
+		bal = "0.00"
+	}
+	return bal, pendingBal, avail, nil
 }
 
 func (c *Client) fetchInventoryItemCount(appID, contextID string) int {
@@ -206,18 +205,8 @@ func (c *Client) fetchInventoryItemCountWithContext(ctx context.Context, appID, 
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 
-	resp, err := c.doRequestWithRetry(ctx, req)
-	if err != nil {
-		return 0
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0
-	}
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
+	if err != nil || resp.StatusCode != http.StatusOK {
 		return 0
 	}
 
@@ -246,7 +235,6 @@ func (c *Client) GetConfirmationsWithContext(ctx context.Context) ([]*Confirmati
 	c.mu.RLock()
 	username := c.Config.Username
 	identitySecret := c.Config.IdentitySecret
-	deviceID := c.Config.DeviceID
 	steamID := c.Config.SteamID
 	c.mu.RUnlock()
 
@@ -260,9 +248,7 @@ func (c *Client) GetConfirmationsWithContext(ctx context.Context) ([]*Confirmati
 		return nil, err
 	}
 
-	if deviceID == "" {
-		deviceID = "android:00000000-0000-0000-0000-000000000000"
-	}
+	deviceID := c.getDeviceID()
 
 	params := url.Values{
 		"p":   {deviceID},
@@ -285,15 +271,9 @@ func (c *Client) GetConfirmationsWithContext(ctx context.Context) ([]*Confirmati
 	}
 	c.Jar.SetCookies(steamCommunityURL, mobileCookies)
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	bodyBytes, _, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return nil, err
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read confirmations response: %w", err)
 	}
 
 	var jsonResp struct {
@@ -373,7 +353,6 @@ func (c *Client) SendConfirmationActionWithContext(ctx context.Context, conf *Co
 	c.mu.RLock()
 	username := c.Config.Username
 	identitySecret := c.Config.IdentitySecret
-	deviceID := c.Config.DeviceID
 	steamID := c.Config.SteamID
 	c.mu.RUnlock()
 
@@ -387,9 +366,7 @@ func (c *Client) SendConfirmationActionWithContext(ctx context.Context, conf *Co
 		return err
 	}
 
-	if deviceID == "" {
-		deviceID = "android:00000000-0000-0000-0000-000000000000"
-	}
+	deviceID := c.getDeviceID()
 
 	params := url.Values{
 		"op":  {action},
@@ -409,15 +386,9 @@ func (c *Client) SendConfirmationActionWithContext(ctx context.Context, conf *Co
 		return err
 	}
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	bodyBytes, _, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read confirmation action response: %w", err)
 	}
 	var actionResp struct {
 		Success bool `json:"success"`
@@ -450,13 +421,7 @@ func (c *Client) GetTradeURLWithContext(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resp, err := c.doRequestWithRetry(ctx, req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, _, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return "", err
 	}
@@ -501,13 +466,7 @@ func (c *Client) GetAvatarURLWithContext(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resp, err := c.doRequestWithRetry(ctx, req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, _, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
 		return "", err
 	}
@@ -555,4 +514,3 @@ func (c *Client) FetchAccountDetailsWithContext(ctx context.Context) (*FullAccou
 
 	return details, nil
 }
-

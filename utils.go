@@ -1,10 +1,13 @@
 package steam
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -347,6 +350,25 @@ func (c *Client) doRequestWithRetry(ctx context.Context, req *http.Request) (*ht
 	return nil, fmt.Errorf("request failed after retries")
 }
 
+// readResponseBody reads the full response body, transparently handling gzip decompression if Content-Encoding is gzip.
+func readResponseBody(resp *http.Response) ([]byte, error) {
+	if resp == nil || resp.Body == nil {
+		return nil, nil
+	}
+	defer resp.Body.Close()
+
+	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+		gzReader, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		defer gzReader.Close()
+		return io.ReadAll(gzReader)
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
 // ensureSessionCookiesForURL injects steamcommunity.com session cookies (sessionid,
 // steamLoginSecure) into the jar for the given URL **only when they are missing**.
 //
@@ -449,3 +471,81 @@ func (c *Client) approveConfirmationForIDWithContext(ctx context.Context, target
 	}
 	return fmt.Errorf("no pending confirmation found for ID %s", targetID)
 }
+
+// GenerateDeviceID generates a deterministic Steam Android device ID for a given steamID64.
+// Matches Steam Desktop Authenticator (SDA) and steampy standard format: android:XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX.
+func GenerateDeviceID(steamID string) string {
+	if steamID == "" {
+		return "android:00000000-0000-0000-0000-000000000000"
+	}
+	h := sha1.Sum([]byte(steamID))
+	hexed := hex.EncodeToString(h[:])
+	return fmt.Sprintf("android:%s-%s-%s-%s-%s",
+		hexed[:8], hexed[8:12], hexed[12:16], hexed[16:20], hexed[20:32])
+}
+
+func (c *Client) getDeviceID() string {
+	c.mu.RLock()
+	devID := c.Config.DeviceID
+	steamID := c.Config.SteamID
+	c.mu.RUnlock()
+
+	if devID != "" {
+		return devID
+	}
+	if steamID != "" {
+		genID := GenerateDeviceID(steamID)
+		c.mu.Lock()
+		c.Config.DeviceID = genID
+		c.mu.Unlock()
+		return genID
+	}
+	return "android:00000000-0000-0000-0000-000000000000"
+}
+
+func getCurrencySymbol(currencyID int) string {
+	switch currencyID {
+	case 1:
+		return "$"
+	case 2:
+		return "£"
+	case 3:
+		return "€"
+	case 5:
+		return "₽"
+	case 18:
+		return "₴"
+	case 37:
+		return "₸"
+	case 23:
+		return "¥"
+	case 17:
+		return "TL"
+	case 34:
+		return "ARS$"
+	case 7:
+		return "R$"
+	case 8:
+		return "¥"
+	case 20:
+		return "CDN$"
+	case 21:
+		return "A$"
+	default:
+		return ""
+	}
+}
+
+// doRequestAndRead executes an HTTP request with retry logic and reads the full response body.
+func (c *Client) doRequestAndRead(ctx context.Context, req *http.Request) ([]byte, *http.Response, error) {
+	resp, err := c.doRequestWithRetry(ctx, req)
+	if err != nil {
+		return nil, nil, err
+	}
+	body, err := readResponseBody(resp)
+	if err != nil {
+		return nil, resp, err
+	}
+	return body, resp, nil
+}
+

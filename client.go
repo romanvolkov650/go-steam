@@ -431,11 +431,10 @@ func (c *Client) LoginWithRefreshTokenWithContext(ctx context.Context) error {
 
 	finResp, err := c.doRequestWithRetry(ctx, finReq)
 	if err != nil {
-		return fmt.Errorf("finalizelogin request failed: %w", err)
+		return fmt.Errorf("failed to finalize login with refresh token: %w", err)
 	}
-	defer finResp.Body.Close()
 
-	finBody, readErr := io.ReadAll(finResp.Body)
+	finBody, readErr := readResponseBody(finResp)
 	if readErr != nil {
 		return fmt.Errorf("failed to read finalizelogin response: %w", readErr)
 	}
@@ -529,16 +528,18 @@ func (c *Client) LoginWithContext(ctx context.Context) error {
 	c.InitSession(ctx)
 
 	c.mu.RLock()
-	refreshToken := c.Config.RefreshToken
+	existingRefreshToken := c.Config.RefreshToken
 	username := c.Config.Username
 	password := c.Config.Password
 	sharedSecret := c.Config.SharedSecret
 	c.mu.RUnlock()
 
-	if refreshToken != "" {
-		if err := c.LoginWithRefreshTokenWithContext(ctx); err == nil && c.LoggedIn {
+	// If we already have a refresh token (e.g. from maFile), try logging in with it first
+	if existingRefreshToken != "" {
+		if err := c.LoginWithRefreshTokenWithContext(ctx); err == nil {
 			return nil
 		}
+		// If refresh token expired or failed, clear it and proceed to credentials auth
 		c.mu.Lock()
 		c.Config.RefreshToken = ""
 		c.mu.Unlock()
@@ -598,6 +599,9 @@ func (c *Client) LoginWithContext(ctx context.Context) error {
 		return fmt.Errorf("shared_secret is required for 2FA authentication")
 	}
 
+	// Perform initial status poll immediately after BeginAuth to initialize session state on Steam backend
+	_, _, _ = c.pollAuthSessionStatusOnce(ctx, clientID, requestID)
+
 	twoFactorCode, err := c.Generate2FACode()
 	if err != nil {
 		return fmt.Errorf("failed to generate 2FA code: %w", err)
@@ -650,11 +654,10 @@ func (c *Client) fetchRSAPublicKeyWithContext(ctx context.Context, username stri
 
 	resp, err := c.doRequestWithRetry(ctx, req)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", fmt.Errorf("failed to fetch RSA key: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readResponseBody(resp)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -744,11 +747,18 @@ func (c *Client) beginAuthSessionWithContext(ctx context.Context, username, pass
 	if err != nil {
 		return 0, nil, "", nil, err
 	}
-	defer beginResp.Body.Close()
 
-	rawBody, readErr := io.ReadAll(beginResp.Body)
+	rawBody, readErr := readResponseBody(beginResp)
 	if readErr != nil {
 		return 0, nil, "", nil, readErr
+	}
+
+	if beginResp.StatusCode != http.StatusOK {
+		return 0, nil, "", rawBody, fmt.Errorf("begin auth session HTTP %d (x-eresult: %s): %s",
+			beginResp.StatusCode, beginResp.Header.Get("X-eresult"), string(rawBody))
+	}
+	if eresult := beginResp.Header.Get("X-eresult"); eresult != "" && eresult != "1" {
+		return 0, nil, "", rawBody, fmt.Errorf("begin auth session failed with eresult %s: %s", eresult, string(rawBody))
 	}
 
 	// CAuthentication_BeginAuthSessionViaCredentials_Response:
@@ -781,12 +791,12 @@ func (c *Client) updateAuthSession2FAWithContext(ctx context.Context, clientID u
 
 	// CAuthentication_UpdateAuthSessionWithSteamGuardCode_Request:
 	//   [1] client_id  (uint64 varint)
-	//   [2] steamid    (int64 wire_type 1 — matches browser HAR)
+	//   [2] steamid    (uint64 varint)
 	//   [3] code       (string)
 	//   [4] code_type  = 3 (device TOTP)
 	var pb []byte
 	pb = append(pb, pbVarint(1, clientID)...)
-	pb = append(pb, pbInt64(2, sidUint)...)
+	pb = append(pb, pbVarint(2, sidUint)...)
 	pb = append(pb, pbString(3, twoFactorCode)...)
 	pb = append(pb, pbVarint(4, 3)...)
 
@@ -804,9 +814,60 @@ func (c *Client) updateAuthSession2FAWithContext(ctx context.Context, clientID u
 	if err != nil {
 		return fmt.Errorf("update auth session failed: %w", err)
 	}
-	defer updateResp.Body.Close()
+
+	body, _ := readResponseBody(updateResp)
+	if updateResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("update auth session HTTP %d: %s (x-eresult: %s)",
+			updateResp.StatusCode, string(body), updateResp.Header.Get("X-eresult"))
+	}
+	if eresult := updateResp.Header.Get("X-eresult"); eresult != "" && eresult != "1" {
+		return fmt.Errorf("update auth session failed with eresult %s: %s", eresult, string(body))
+	}
 
 	return nil
+}
+
+// pollAuthSessionStatusOnce executes a single PollAuthSessionStatus request to register session state.
+func (c *Client) pollAuthSessionStatusOnce(ctx context.Context, clientID uint64, requestID []byte) (refreshToken, accessToken string, err error) {
+	var pb []byte
+	pb = append(pb, pbVarint(1, clientID)...)
+	if len(requestID) > 0 {
+		pb = append(pb, pbBytes(2, requestID)...)
+	}
+
+	pollReq, err := c.newMultipartProtoRequest(
+		ctx,
+		"https://api.steampowered.com/IAuthenticationService/PollAuthSessionStatus/v1",
+		pb,
+		"https://steamcommunity.com/",
+	)
+	if err != nil {
+		return "", "", err
+	}
+
+	pollResp, err := c.doRequestWithRetry(ctx, pollReq)
+	if err != nil {
+		return "", "", err
+	}
+
+	body, readErr := readResponseBody(pollResp)
+	if readErr != nil {
+		return "", "", readErr
+	}
+
+	if eresult := pollResp.Header.Get("X-eresult"); eresult != "" && eresult != "1" {
+		return "", "", fmt.Errorf("poll auth status eresult: %s", eresult)
+	}
+
+	fields, pbErr := pbDecode(body)
+	if pbErr == nil {
+		rToken := pbGetString(fields, 3)
+		aToken := pbGetString(fields, 4)
+		if rToken != "" {
+			return rToken, aToken, nil
+		}
+	}
+	return "", "", nil
 }
 
 // pollAuthSessionStatusWithContext polls Steam until the auth session produces tokens.
@@ -817,69 +878,28 @@ func (c *Client) updateAuthSession2FAWithContext(ctx context.Context, clientID u
 //	[3] refresh_token (string JWT)
 //	[4] access_token  (string JWT)
 func (c *Client) pollAuthSessionStatusWithContext(ctx context.Context, clientID uint64, requestID []byte) (refreshToken, accessToken string, err error) {
-	// Build CPollAuthSessionStatus_Request:
-	//   [1] client_id  (uint64 varint)
-	//   [2] request_id (bytes, raw 16 bytes from BeginAuth response)
-	var pb []byte
-	pb = append(pb, pbVarint(1, clientID)...)
-	if len(requestID) > 0 {
-		pb = append(pb, pbBytes(2, requestID)...)
-	}
-
 	var lastPollErr error
-	var lastPollBody []byte
 
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < 15; attempt++ {
 		select {
 		case <-ctx.Done():
 			if lastPollErr != nil {
 				return "", "", fmt.Errorf("%w (poll error: %v)", ctx.Err(), lastPollErr)
 			}
 			return "", "", ctx.Err()
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(1 * time.Second):
 		}
 
-		pollReq, err := c.newMultipartProtoRequest(
-			ctx,
-			"https://api.steampowered.com/IAuthenticationService/PollAuthSessionStatus/v1",
-			pb,
-			"https://steamcommunity.com/",
-		)
+		rToken, aToken, err := c.pollAuthSessionStatusOnce(ctx, clientID, requestID)
+		if err == nil && rToken != "" {
+			return rToken, aToken, nil
+		}
 		if err != nil {
 			lastPollErr = err
-			continue
-		}
-
-		pollResp, err := c.doRequestWithRetry(ctx, pollReq)
-		if err != nil {
-			lastPollErr = err
-			continue
-		}
-
-		body, readErr := io.ReadAll(pollResp.Body)
-		pollResp.Body.Close()
-
-		if readErr != nil {
-			lastPollErr = readErr
-			continue
-		}
-
-		lastPollBody = body
-
-		// Parse binary protobuf response.
-		// CPollAuthSessionStatus_Response:
-		//   [3] refresh_token (string)
-		//   [4] access_token  (string)
-		fields, pbErr := pbDecode(body)
-		if pbErr == nil {
-			rToken := pbGetString(fields, 3)
-			aToken := pbGetString(fields, 4)
-			if rToken != "" {
-				return rToken, aToken, nil
+			if strings.Contains(err.Error(), "eresult:") && !strings.Contains(err.Error(), "84") {
+				return "", "", err
 			}
-		}
-
-		if len(lastPollBody) > 0 {
+		} else {
 			lastPollErr = fmt.Errorf("poll auth status pending (attempt %d)", attempt+1)
 		}
 	}
