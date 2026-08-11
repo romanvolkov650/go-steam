@@ -87,6 +87,8 @@ type AccountService interface {
 	GetTradeURLWithContext(ctx context.Context) (string, error)
 	GetAvatarURL() (string, error)
 	GetAvatarURLWithContext(ctx context.Context) (string, error)
+	GetUserProfile() (*UserProfile, error)
+	GetUserProfileWithContext(ctx context.Context) (*UserProfile, error)
 	FetchAccountDetails() (*FullAccountDetails, error)
 	FetchAccountDetailsWithContext(ctx context.Context) (*FullAccountDetails, error)
 	ExportCookies() ([]*CookieJSON, error)

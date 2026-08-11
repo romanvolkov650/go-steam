@@ -26,6 +26,9 @@ var (
 
 	// ErrNewDeviceTradeCooldown is returned when the account is trade banned/restricted for 7 days due to logging in from a new device.
 	ErrNewDeviceTradeCooldown = errors.New("steam: account has logged in a new device and cannot trade for 7 days")
+
+	// ErrProfileNotConfigured is returned when the user's Steam community profile has not been set up.
+	ErrProfileNotConfigured = errors.New("steam: profile not set up / configured")
 )
 
 // SteamAPIError represents a structured error returned by Steam HTTP endpoints.

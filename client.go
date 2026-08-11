@@ -742,10 +742,14 @@ func (c *Client) LogoutWithContext(ctx context.Context) error {
 		"sessionid": {sessionID},
 	}
 
-	req, err := c.newAjaxPostRequestWithContext(ctx, "https://store.steampowered.com/login/logout/", data, "https://store.steampowered.com/")
+	// Create a standard navigate POST request (mimicking browser form submit to steamcommunity.com/login/logout/)
+	body := strings.NewReader(data.Encode())
+	req, err := c.newRequestWithContext(ctx, "POST", "https://steamcommunity.com/login/logout/", body, "https://steamcommunity.com/")
 	if err != nil {
 		return err
 	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://steamcommunity.com")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {

@@ -31,7 +31,16 @@ var (
 	reConfID          = regexp.MustCompile(`data-confid="(\d+)"`)
 	reConfKey         = regexp.MustCompile(`data-key="(\d+)"`)
 	reConfCreator     = regexp.MustCompile(`data-creator="(\d+)"`)
+	rePersonaName     = regexp.MustCompile(`(?i)<span\s+class="actual_persona_name">([\s\S]*?)</span>`)
+	reProfileSummary  = regexp.MustCompile(`(?s)<div\s+class="profile_summary(?:_body)?">\s*([\s\S]*?)\s*</div>`)
 )
+
+// UserProfile represents the public Steam profile details.
+type UserProfile struct {
+	Nickname    string `json:"nickname"`
+	AvatarURL   string `json:"avatar_url"`
+	Description string `json:"description"`
+}
 
 // AccountStatus holds fetched Steam account data (balance, inventories, bans).
 type AccountStatus struct {
@@ -456,13 +465,14 @@ func (c *Client) GetTradeURLWithContext(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("trade offer URL not found")
 }
 
-// GetAvatarURL fetches the account's profile avatar image URL.
-func (c *Client) GetAvatarURL() (string, error) {
-	return c.GetAvatarURLWithContext(context.Background())
+// GetUserProfile fetches the public Steam profile details.
+func (c *Client) GetUserProfile() (*UserProfile, error) {
+	return c.GetUserProfileWithContext(context.Background())
 }
 
-// GetAvatarURLWithContext fetches the account's profile avatar image URL directly from playerAvatarAutoSizeInner HTML header block with context support.
-func (c *Client) GetAvatarURLWithContext(ctx context.Context) (string, error) {
+// GetUserProfileWithContext fetches the public Steam profile details with context support.
+// If the profile has not been set up, it returns ErrProfileNotConfigured.
+func (c *Client) GetUserProfileWithContext(ctx context.Context) (*UserProfile, error) {
 	c.mu.RLock()
 	steamID := c.Config.SteamID
 	c.mu.RUnlock()
@@ -474,26 +484,64 @@ func (c *Client) GetAvatarURLWithContext(ctx context.Context) (string, error) {
 
 	req, err := c.newRequestWithContext(ctx, "GET", profileURL, nil, "https://steamcommunity.com/")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	bodyBytes, _, err := c.doRequestAndRead(ctx, req)
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	bodyStr := string(bodyBytes)
 
-	// Target profile avatar block (playerAvatarAutoSizeInner / playerAvatarHeading)
+	// Check if redirected to home or contains edit welcomed link indicating unconfigured profile
+	if (resp != nil && resp.Request != nil && strings.HasSuffix(resp.Request.URL.Path, "/home")) ||
+		strings.Contains(bodyStr, "edit?welcomed=1") ||
+		strings.Contains(bodyStr, "welcomed=1") {
+		return nil, ErrProfileNotConfigured
+	}
+
+	profile := &UserProfile{}
+
+	// Parse Nickname
+	if matches := rePersonaName.FindStringSubmatch(bodyStr); len(matches) > 1 {
+		profile.Nickname = html.UnescapeString(strings.TrimSpace(matches[1]))
+	}
+
+	// Parse Avatar URL
 	if matches := reAvatarInner.FindStringSubmatch(bodyStr); len(matches) > 1 {
-		return matches[1], nil
+		profile.AvatarURL = matches[1]
+	} else if matches := reAvatarImg.FindStringSubmatch(bodyStr); len(matches) > 1 {
+		profile.AvatarURL = matches[1]
 	}
 
-	// Secondary check inside playerAvatarAutoSizeInner block for any img src
-	if matches := reAvatarImg.FindStringSubmatch(bodyStr); len(matches) > 1 {
-		return matches[1], nil
+	// Parse Description
+	if matches := reProfileSummary.FindStringSubmatch(bodyStr); len(matches) > 1 {
+		desc := reStripHTML.ReplaceAllString(matches[1], "")
+		profile.Description = html.UnescapeString(strings.TrimSpace(desc))
 	}
 
-	return "", fmt.Errorf("avatar URL not found for %s in profile header", c.Config.Username)
+	if profile.Nickname == "" && profile.AvatarURL == "" {
+		return nil, fmt.Errorf("failed to parse profile data for %s", c.Config.Username)
+	}
+
+	return profile, nil
+}
+
+// GetAvatarURL fetches the account's profile avatar image URL.
+func (c *Client) GetAvatarURL() (string, error) {
+	return c.GetAvatarURLWithContext(context.Background())
+}
+
+// GetAvatarURLWithContext fetches the account's profile avatar image URL directly with context support.
+func (c *Client) GetAvatarURLWithContext(ctx context.Context) (string, error) {
+	profile, err := c.GetUserProfileWithContext(ctx)
+	if err != nil {
+		return "", err
+	}
+	if profile.AvatarURL == "" {
+		return "", fmt.Errorf("avatar URL not found for %s in profile header", c.Config.Username)
+	}
+	return profile.AvatarURL, nil
 }
 
 // FetchAccountDetails aggregates wallet balance, trade URL, and avatar URL in a single call.
