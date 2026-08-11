@@ -90,3 +90,41 @@ func TestGetUserProfile_Unconfigured(t *testing.T) {
 		t.Fatalf("expected ErrProfileNotConfigured error, got %v", err)
 	}
 }
+
+func TestGetAvatarURL_Unconfigured(t *testing.T) {
+	htmlSnippet := `
+<html>
+<head>
+	<title>Steam Community :: Welcome</title>
+</head>
+<body>
+	<a href="https://steamcommunity.com/profiles/76561199868126417/edit?welcomed=1">Set Up Profile</a>
+</body>
+</html>`
+
+	client, err := NewClient(ClientConfig{Username: "testuser"})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+
+	client.HTTPClient.Transport = mockRoundTripper(func(req *http.Request) (*http.Response, error) {
+		// Mock redirect target
+		req.URL.Path = "/profiles/76561199868126417/home"
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(bytes.NewBufferString(htmlSnippet)),
+			Request:    req,
+		}, nil
+	})
+
+	avatarURL, err := client.GetAvatarURL()
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	expectedDefault := "https://avatars.fastly.steamstatic.com/fef49e7fa7e1997310d705b2a6158ff8dc1cdfeb_full.jpg"
+	if avatarURL != expectedDefault {
+		t.Errorf("expected avatar URL %q, got %q", expectedDefault, avatarURL)
+	}
+}
+

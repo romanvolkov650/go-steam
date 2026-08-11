@@ -3,6 +3,7 @@ package steam
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
@@ -536,10 +537,13 @@ func (c *Client) GetAvatarURL() (string, error) {
 func (c *Client) GetAvatarURLWithContext(ctx context.Context) (string, error) {
 	profile, err := c.GetUserProfileWithContext(ctx)
 	if err != nil {
+		if errors.Is(err, ErrProfileNotConfigured) {
+			return "https://avatars.fastly.steamstatic.com/fef49e7fa7e1997310d705b2a6158ff8dc1cdfeb_full.jpg", nil
+		}
 		return "", err
 	}
 	if profile.AvatarURL == "" {
-		return "", fmt.Errorf("avatar URL not found for %s in profile header", c.Config.Username)
+		return "https://avatars.fastly.steamstatic.com/fef49e7fa7e1997310d705b2a6158ff8dc1cdfeb_full.jpg", nil
 	}
 	return profile.AvatarURL, nil
 }
