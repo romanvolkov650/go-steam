@@ -60,6 +60,9 @@ type TradeOfferService interface {
 
 	AcceptTradeOfferConfirmation(tradeOfferID string) error
 	AcceptTradeOfferConfirmationWithContext(ctx context.Context, tradeOfferID string) error
+
+	CheckTradeLimit(tradeURL string) (bool, string, error)
+	CheckTradeLimitWithContext(ctx context.Context, tradeURL string) (bool, string, error)
 }
 
 // AuthenticatorService defines methods for Steam Guard 2FA and mobile confirmations.

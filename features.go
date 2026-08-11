@@ -466,6 +466,59 @@ func (c *Client) GetTradeURLWithContext(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("trade offer URL not found")
 }
 
+// CheckTradeLimit checks if the trade URL shows any trade limit message for the current session.
+func (c *Client) CheckTradeLimit(tradeURL string) (bool, string, error) {
+	return c.CheckTradeLimitWithContext(context.Background(), tradeURL)
+}
+
+// CheckTradeLimitWithContext checks if the trade URL shows any trade limit message for the current session with context support.
+func (c *Client) CheckTradeLimitWithContext(ctx context.Context, tradeURL string) (bool, string, error) {
+	req, err := c.newRequestWithContext(ctx, "GET", tradeURL, nil, "https://steamcommunity.com/")
+	if err != nil {
+		return false, "", err
+	}
+	bodyBytes, _, err := c.doRequestAndRead(ctx, req)
+	if err != nil {
+		return false, "", err
+	}
+
+	bodyStr := string(bodyBytes)
+	lowerBody := strings.ToLower(bodyStr)
+
+	// Check for trade limit indicators
+	if strings.Contains(lowerBody, "forgot and then reset") ||
+		strings.Contains(lowerBody, "unable to trade") ||
+		strings.Contains(lowerBody, "protect the items in your inventory") ||
+		strings.Contains(lowerBody, "сбросили пароль") ||
+		strings.Contains(lowerBody, "не сможете обмениваться") {
+
+		var reason string
+		reErrorMsg := regexp.MustCompile(`(?i)<div[^>]*id="error_msg"[^>]*>\s*([^<]+)\s*</div>`)
+		matches := reErrorMsg.FindStringSubmatch(bodyStr)
+		if len(matches) > 1 {
+			reason = html.UnescapeString(strings.TrimSpace(matches[1]))
+		} else {
+			reErrorBox := regexp.MustCompile(`(?i)<div[^>]*class="[^"]*error_box[^"]*"[^>]*>\s*([^<]+)\s*</div>`)
+			boxMatches := reErrorBox.FindStringSubmatch(bodyStr)
+			if len(boxMatches) > 1 {
+				reason = html.UnescapeString(strings.TrimSpace(boxMatches[1]))
+			} else {
+				if strings.Contains(lowerBody, "forgot and then reset") {
+					reason = "You recently forgot and then reset your Steam account's password. In order to protect the items in your inventory, you will be unable to trade."
+				} else if strings.Contains(lowerBody, "сбросили пароль") {
+					reason = "Вы недавно забыли и сбросили пароль от аккаунта Steam. В целях защиты предметов обмен временно недоступен."
+				} else {
+					reason = "Trade is limited/restricted on this account"
+				}
+			}
+		}
+		reason = strings.Join(strings.Fields(reason), " ")
+		return true, reason, nil
+	}
+
+	return false, "", nil
+}
+
 // GetUserProfile fetches the public Steam profile details.
 func (c *Client) GetUserProfile() (*UserProfile, error) {
 	return c.GetUserProfileWithContext(context.Background())
