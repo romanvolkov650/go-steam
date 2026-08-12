@@ -838,32 +838,6 @@ func (c *Client) SendTradeOfferWithContext(ctx context.Context, tradeURL string,
 		return "", false, fmt.Errorf("failed to send trade offer: %w", err)
 	}
 
-	// Handle 401 / 403 Unauthorized by attempting a fresh login and retrying once
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		c.mu.RLock()
-		hasCreds := c.Config.Password != "" || c.Config.RefreshToken != ""
-		c.mu.RUnlock()
-
-		if hasCreds {
-			if loginErr := c.LoginWithContext(ctx); loginErr == nil {
-				newSessionID := c.GetSessionID()
-
-				formData.Set("sessionid", newSessionID)
-				retryReq, retryErr := c.newAjaxPostRequestWithContext(ctx, sendURL, formData, refererURL)
-				if retryErr == nil {
-					retryResp, retryDoErr := c.doRequestWithRetry(ctx, retryReq)
-					if retryDoErr == nil {
-						if retryResp.StatusCode == http.StatusOK {
-							b, _ := readResponseBody(retryResp)
-							bodyBytes = b
-							resp.StatusCode = http.StatusOK
-						}
-					}
-				}
-			}
-		}
-	}
-
 	if resp.StatusCode != http.StatusOK {
 		return "", false, &SteamAPIError{StatusCode: resp.StatusCode, Message: string(bodyBytes)}
 	}

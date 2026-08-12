@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -250,12 +251,21 @@ func (c *Client) newAjaxPostRequest(reqURL string, formData url.Values, referer 
 // newAjaxPostRequestWithContext creates a POST http.Request bound to ctx with urlencoded body and standard Steam AJAX headers.
 func (c *Client) newAjaxPostRequestWithContext(ctx context.Context, reqURL string, formData url.Values, referer string) (*http.Request, error) {
 	var body io.Reader
+	var encodedData string
 	if formData != nil {
-		body = strings.NewReader(formData.Encode())
+		encodedData = formData.Encode()
+		body = strings.NewReader(encodedData)
 	}
 	req, err := c.newRequestWithContext(ctx, "POST", reqURL, body, referer)
 	if err != nil {
 		return nil, err
+	}
+	// Set GetBody so the request body can be replayed after auto-relogin retry.
+	// This is the same mechanism Go's http.Client uses for redirects.
+	if encodedData != "" {
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(encodedData)), nil
+		}
 	}
 	if referer != "" {
 		req.Header.Set("Referer", referer)
@@ -527,8 +537,11 @@ func getCurrencySymbol(currencyID int) string {
 	}
 }
 
-// doRequestAndRead executes an HTTP request with retry logic and reads the full response body.
-func (c *Client) doRequestAndRead(ctx context.Context, req *http.Request) ([]byte, *http.Response, error) {
+// doRequestAndReadOnce executes an HTTP request with retry logic (for transient errors)
+// and reads the full response body. Returns ErrSessionExpired if redirected to login page.
+// Note: 401/403 status codes are NOT treated as session expiration because Steam uses
+// these for trade limits and other authorization issues, not just invalid sessions.
+func (c *Client) doRequestAndReadOnce(ctx context.Context, req *http.Request) ([]byte, *http.Response, error) {
 	resp, err := c.doRequestWithRetry(ctx, req)
 	if err != nil {
 		return nil, nil, err
@@ -548,5 +561,60 @@ func (c *Client) doRequestAndRead(ctx context.Context, req *http.Request) ([]byt
 		return nil, resp, err
 	}
 	return body, resp, nil
+}
+
+// doRequestAndRead executes an HTTP request with retry logic and reads the full response body.
+// When AutoRelogin is enabled, it automatically recovers from ErrSessionExpired by calling
+// Login() and retrying the request once — mimicking how a browser transparently refreshes
+// session tokens via the refresh_token cookie.
+func (c *Client) doRequestAndRead(ctx context.Context, req *http.Request) ([]byte, *http.Response, error) {
+	body, resp, err := c.doRequestAndReadOnce(ctx, req)
+
+	// If session is alive or AutoRelogin is disabled, return as-is
+	if !errors.Is(err, ErrSessionExpired) || !c.AutoRelogin {
+		return body, resp, err
+	}
+
+	// Attempt automatic session recovery (Login tries refresh token first)
+	if loginErr := c.LoginWithContext(ctx); loginErr != nil {
+		return nil, resp, fmt.Errorf("%w (auto-relogin failed: %v)", ErrSessionExpired, loginErr)
+	}
+
+	// Persist cookies after successful relogin
+	if c.CookiesFilePath != "" {
+		_ = c.SaveCookiesToFile(c.CookiesFilePath)
+	}
+
+	// Clone the request for retry: replay body via GetBody, copy headers
+	retryReq := req.Clone(ctx)
+	if req.GetBody != nil {
+		newBody, bodyErr := req.GetBody()
+		if bodyErr != nil {
+			return nil, resp, fmt.Errorf("failed to replay request body after relogin: %w", bodyErr)
+		}
+		retryReq.Body = newBody
+
+		// Replace stale sessionid in POST body with the fresh one from the new session
+		if req.Method == "POST" {
+			bodyData, _ := io.ReadAll(retryReq.Body)
+			bodyStr := string(bodyData)
+			newSessionID := c.GetSessionID()
+			if newSessionID != "" && strings.Contains(bodyStr, "sessionid=") {
+				// Parse, update, and re-encode form data
+				if formValues, parseErr := url.ParseQuery(bodyStr); parseErr == nil {
+					formValues.Set("sessionid", newSessionID)
+					updatedBody := formValues.Encode()
+					retryReq.Body = io.NopCloser(strings.NewReader(updatedBody))
+					retryReq.ContentLength = int64(len(updatedBody))
+				} else {
+					retryReq.Body = io.NopCloser(strings.NewReader(bodyStr))
+				}
+			} else {
+				retryReq.Body = io.NopCloser(strings.NewReader(bodyStr))
+			}
+		}
+	}
+
+	return c.doRequestAndReadOnce(ctx, retryReq)
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,6 +41,15 @@ type Client struct {
 	Config     ClientConfig
 	HTTPClient *http.Client
 	Jar        *TrackingCookieJar
+
+	// AutoRelogin enables automatic session recovery in doRequestAndRead.
+	// When true, if a request detects ErrSessionExpired (redirect to /login),
+	// the client will automatically attempt Login() and retry the request once.
+	AutoRelogin bool
+
+	// CookiesFilePath, if set, is used to automatically persist cookies
+	// after a successful login or automatic session recovery.
+	CookiesFilePath string
 
 	mu               sync.RWMutex
 	LoggedIn         bool
@@ -517,6 +527,14 @@ func (c *Client) LoginWithRefreshTokenWithContext(ctx context.Context) error {
 		return fmt.Errorf("failed to read finalizelogin response: %w", readErr)
 	}
 
+	if finResp.StatusCode == http.StatusTooManyRequests || finResp.StatusCode >= 500 {
+		return fmt.Errorf("server/network error during refresh token login (HTTP %d)", finResp.StatusCode)
+	}
+
+	if finResp.StatusCode == http.StatusUnauthorized || finResp.StatusCode == http.StatusForbidden {
+		return ErrInvalidRefreshToken
+	}
+
 	var finResult struct {
 		SteamID      string `json:"steamID"`
 		TransferInfo []struct {
@@ -525,7 +543,15 @@ func (c *Client) LoginWithRefreshTokenWithContext(ctx context.Context) error {
 		} `json:"transfer_info"`
 	}
 
-	if err := json.Unmarshal(finBody, &finResult); err == nil && len(finResult.TransferInfo) > 0 {
+	err = json.Unmarshal(finBody, &finResult)
+
+	// If Steam returned a 200 OK but the JSON doesn't contain the expected transfer_info,
+	// it generally means the refresh token was rejected (e.g., {"error": 8, "success": false}).
+	if err == nil && len(finResult.TransferInfo) == 0 {
+		return fmt.Errorf("%w: %s", ErrInvalidRefreshToken, string(finBody))
+	}
+
+	if err == nil && len(finResult.TransferInfo) > 0 {
 		if finResult.SteamID != "" {
 			c.mu.Lock()
 			c.Config.SteamID = finResult.SteamID
@@ -563,7 +589,7 @@ func (c *Client) LoginWithRefreshTokenWithContext(ctx context.Context) error {
 		return nil
 	}
 
-	return fmt.Errorf("failed to finalize login with refresh token: %s", string(finBody))
+	return fmt.Errorf("failed to finalize login with refresh token (JSON parse error): %w. Body: %s", err, string(finBody))
 }
 
 // InitSession performs a lightweight initialization by visiting key Steam domains
@@ -621,10 +647,17 @@ func (c *Client) LoginWithContext(ctx context.Context) error {
 
 	// If we already have a refresh token (e.g. from maFile), try refreshing first
 	if existingRefreshToken != "" {
-		if err := c.LoginWithRefreshTokenWithContext(ctx); err == nil {
+		err := c.LoginWithRefreshTokenWithContext(ctx)
+		if err == nil {
 			return nil
 		}
-		// If refresh token expired or failed, clear it and proceed to credentials auth
+		
+		// If it's a network/transport error (like 502 Bad Gateway), don't wipe the token and don't do a full login.
+		if !errors.Is(err, ErrInvalidRefreshToken) {
+			return fmt.Errorf("network/server error during refresh token login: %w", err)
+		}
+
+		// If refresh token explicitly expired or failed (ErrInvalidRefreshToken), clear it and proceed to credentials auth
 		c.mu.Lock()
 		c.Config.RefreshToken = ""
 		c.mu.Unlock()
