@@ -868,3 +868,41 @@ func (c *Client) AcceptTradeOfferConfirmation(tradeOfferID string) error {
 func (c *Client) AcceptTradeOfferConfirmationWithContext(ctx context.Context, tradeOfferID string) error {
 	return c.approveConfirmationForIDWithContext(ctx, tradeOfferID)
 }
+
+// AcknowledgeTrade acknowledges new trade offers, typically clearing the "new trade offer" notification.
+func (c *Client) AcknowledgeTrade() error {
+	return c.AcknowledgeTradeWithContext(context.Background())
+}
+
+// AcknowledgeTradeWithContext acknowledges new trade offers with context support.
+func (c *Client) AcknowledgeTradeWithContext(ctx context.Context) error {
+	sessionID := c.GetSessionID()
+	steamID := c.Config.SteamID
+
+	if steamID == "" {
+		return fmt.Errorf("SteamID is required to acknowledge trades")
+	}
+
+	referer := fmt.Sprintf("https://steamcommunity.com/profiles/%s/tradeoffers", steamID)
+	reqURL := "https://steamcommunity.com/trade/new/acknowledge"
+
+	formData := url.Values{}
+	formData.Set("sessionid", sessionID)
+	formData.Set("message", "1")
+
+	req, err := c.newAjaxPostRequestWithContext(ctx, reqURL, formData, referer)
+	if err != nil {
+		return err
+	}
+
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
+	if err != nil {
+		return fmt.Errorf("failed to execute acknowledge trade request: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return &SteamAPIError{StatusCode: resp.StatusCode, Message: string(bodyBytes)}
+	}
+
+	return nil
+}
