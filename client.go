@@ -610,8 +610,12 @@ func (c *Client) LoginWithContext(ctx context.Context) error {
 
 	// If already logged in, check if session is still alive before re-creating (like steampy)
 	if alreadyLoggedIn {
-		if alive, _ := c.IsSessionAliveWithContext(ctx); alive {
+		alive, err := c.IsSessionAliveWithContext(ctx)
+		if err == nil && alive {
 			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("session liveness check failed: %w", err)
 		}
 	}
 

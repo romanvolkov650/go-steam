@@ -203,7 +203,7 @@ func (c *Client) fetchWalletBalanceWithContext(ctx context.Context) (balance, pe
 
 	bal, pendingBal, avail := extractWalletBalanceDetailsFromHTML(string(bodyBytes))
 	if bal == "" {
-		return "0.00", "", "", fmt.Errorf("failed to extract wallet balance: session may be expired or invalid")
+		return "0.00", "", "", ErrSessionExpired
 	}
 	return bal, pendingBal, avail, nil
 }

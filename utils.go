@@ -533,6 +533,16 @@ func (c *Client) doRequestAndRead(ctx context.Context, req *http.Request) ([]byt
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Detect redirect to Steam login page which indicates expired/invalid session
+	if resp.Request != nil && resp.Request.URL != nil {
+		path := strings.ToLower(resp.Request.URL.Path)
+		if strings.HasPrefix(path, "/login") && !strings.HasPrefix(path, "/login/settoken") && !strings.HasPrefix(path, "/login/logout") {
+			resp.Body.Close()
+			return nil, resp, ErrSessionExpired
+		}
+	}
+
 	body, err := readResponseBody(resp)
 	if err != nil {
 		return nil, resp, err
