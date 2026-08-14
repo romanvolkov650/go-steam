@@ -19,8 +19,9 @@ import (
 	"github.com/imroc/req/v3"
 )
 
-const (
-	defaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+var (
+	chromeTemplate   = req.C().ImpersonateChrome()
+	defaultUserAgent = chromeTemplate.Headers.Get("User-Agent")
 )
 
 // ClientConfig holds explicit credentials and parameters needed to instantiate a Steam client.
@@ -506,8 +507,30 @@ func (c *Client) LoginWithRefreshTokenWithContext(ctx context.Context) error {
 		return fmt.Errorf("refresh_token is empty")
 	}
 
+	cleanNonce := refreshToken
+	if strings.Contains(cleanNonce, "||") {
+		parts := strings.Split(cleanNonce, "||")
+		if len(parts) > 1 {
+			cleanNonce = parts[1]
+		}
+	}
+	cleanNonce = strings.ReplaceAll(cleanNonce, "%7C", "|")
+	if strings.Contains(cleanNonce, "|") {
+		parts := strings.Split(cleanNonce, "|")
+		if len(parts) > 1 {
+			cleanNonce = parts[1]
+		}
+	}
+
+	if sessionID == "" {
+		sessionID = generateRandomSessionID()
+		c.mu.Lock()
+		c.SessionID = sessionID
+		c.mu.Unlock()
+	}
+
 	finalizeData := url.Values{
-		"nonce":     {refreshToken},
+		"nonce":     {cleanNonce},
 		"sessionid": {sessionID},
 		"redir":     {"https://steamcommunity.com/login/home/?goto="},
 	}
@@ -582,6 +605,22 @@ func (c *Client) LoginWithRefreshTokenWithContext(ctx context.Context) error {
 
 		// Synchronize auth cookies between community and store domains (like steampy's set_sessionid_cookies)
 		c.syncSessionCookies()
+
+		// Extract updated steamLoginSecure from jar
+		commCookies := c.Jar.Cookies(steamCommunityURL)
+		for _, ck := range commCookies {
+			if ck.Name == "steamLoginSecure" && ck.Value != "" {
+				c.mu.Lock()
+				c.SteamLoginSecure = strings.ReplaceAll(ck.Value, "%7C", "|")
+				c.LoggedIn = true
+				c.mu.Unlock()
+			}
+			if ck.Name == "sessionid" && ck.Value != "" {
+				c.mu.Lock()
+				c.SessionID = ck.Value
+				c.mu.Unlock()
+			}
+		}
 
 		c.mu.Lock()
 		c.LoggedIn = true

@@ -412,11 +412,10 @@ func (c *Client) GetPartnerInventoryWithContext(ctx context.Context, steamID, ap
 			}
 		}
 
-		req, err := c.newRequestWithContext(ctx, "GET", reqURL, nil, fmt.Sprintf("https://steamcommunity.com/profiles/%s/inventory", steamID))
+		req, err := c.newFetchRequestWithContext(ctx, "GET", reqURL, nil, fmt.Sprintf("https://steamcommunity.com/profiles/%s/inventory", steamID))
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Accept", "*/*")
 		req.Header.Set("X-Requested-With", "XMLHttpRequest")
 
 		resp, err := c.doRequestWithRetry(ctx, req)
@@ -448,6 +447,7 @@ func (c *Client) GetPartnerInventoryWithContext(ctx context.Context, steamID, ap
 	var inventoryResp struct {
 		Success    FlexibleBool `json:"success"`
 		Error      string       `json:"error"`
+		Rwgrsn     int          `json:"rwgrsn"`
 		TotalCount int          `json:"total_inventory_count"`
 		Assets     []struct {
 			AppID      int    `json:"appid"`
@@ -470,6 +470,10 @@ func (c *Client) GetPartnerInventoryWithContext(ctx context.Context, steamID, ap
 
 	if inventoryResp.Error != "" {
 		return nil, fmt.Errorf("steam inventory error for %s: %s", steamID, inventoryResp.Error)
+	}
+
+	if inventoryResp.Rwgrsn < 0 && len(inventoryResp.Assets) == 0 {
+		return nil, fmt.Errorf("%w: inventory access restricted or session invalid (rwgrsn: %d)", ErrSessionExpired, inventoryResp.Rwgrsn)
 	}
 
 	descMap := make(map[string]econItemDescription)

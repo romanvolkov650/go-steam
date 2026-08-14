@@ -169,12 +169,13 @@ const (
 )
 
 func setBrowserHeaders(req *http.Request, reqType ReqType) {
-	req.Header.Set("User-Agent", defaultUserAgent)
-	req.Header.Set("sec-ch-ua", `"Not(A:Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"`)
-	req.Header.Set("sec-ch-ua-mobile", "?0")
-	req.Header.Set("sec-ch-ua-platform", `"macOS"`)
-	req.Header.Set("accept-language", "en-US,en;q=0.9,ru;q=0.8")
-	req.Header.Set("accept-encoding", "gzip, deflate, br")
+	// Base browser headers directly inherited from ImpersonateChrome() (macOS)
+	for k, vv := range chromeTemplate.Headers {
+		for _, v := range vv {
+			req.Header.Set(k, v)
+		}
+	}
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9,ru;q=0.8")
 
 	// Determine sec-fetch-site based on URL and Referer
 	secFetchSite := "none"
@@ -205,12 +206,16 @@ func setBrowserHeaders(req *http.Request, reqType ReqType) {
 		req.Header.Set("sec-fetch-dest", "document")
 		req.Header.Set("sec-fetch-user", "?1")
 	case ReqTypeAjaxXHR:
+		req.Header.Del("upgrade-insecure-requests")
+		req.Header.Del("sec-fetch-user")
 		req.Header.Set("accept", "*/*")
 		req.Header.Set("sec-fetch-mode", "cors")
 		req.Header.Set("sec-fetch-dest", "empty")
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
 		req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	case ReqTypeFetch:
+		req.Header.Del("upgrade-insecure-requests")
+		req.Header.Del("sec-fetch-user")
 		req.Header.Set("accept", "*/*")
 		req.Header.Set("sec-fetch-mode", "cors")
 		req.Header.Set("sec-fetch-dest", "empty")
