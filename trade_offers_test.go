@@ -205,3 +205,46 @@ func (t *testTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req.URL.Host = u.Host
 	return http.DefaultTransport.RoundTrip(req)
 }
+
+func TestGetUserInventoryWithContext_EmptyInventoryValidSession(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":1,"rwgrsn":-2,"total_inventory_count":0}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{Username: "testuser", SteamID: "76561198000000000"})
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	client.SessionID = "test_session_id"
+	client.HTTPClient.Transport = &testTransport{serverURL: server.URL}
+
+	items, err := client.GetUserInventoryWithContext(nil, "730", "16")
+	if err != nil {
+		t.Fatalf("Expected no error for empty inventory with total_inventory_count:0, got: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("Expected 0 items, got %d", len(items))
+	}
+}
+
+func TestGetUserInventoryWithContext_InvalidSession(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"success":1,"rwgrsn":-2}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{Username: "testuser", SteamID: "76561198000000000"})
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	client.SessionID = "test_session_id"
+	client.HTTPClient.Transport = &testTransport{serverURL: server.URL}
+
+	_, err = client.GetUserInventoryWithContext(nil, "730", "16")
+	if err == nil {
+		t.Fatalf("Expected ErrSessionExpired for response without total_inventory_count, got nil")
+	}
+}

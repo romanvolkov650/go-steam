@@ -448,7 +448,7 @@ func (c *Client) GetPartnerInventoryWithContext(ctx context.Context, steamID, ap
 		Success    FlexibleBool `json:"success"`
 		Error      string       `json:"error"`
 		Rwgrsn     int          `json:"rwgrsn"`
-		TotalCount int          `json:"total_inventory_count"`
+		TotalCount *int         `json:"total_inventory_count"`
 		Assets     []struct {
 			AppID      int    `json:"appid"`
 			ContextID  string `json:"contextid"`
@@ -473,6 +473,9 @@ func (c *Client) GetPartnerInventoryWithContext(ctx context.Context, steamID, ap
 	}
 
 	if inventoryResp.Rwgrsn < 0 && len(inventoryResp.Assets) == 0 {
+		if inventoryResp.TotalCount != nil {
+			return []TradeItem{}, nil
+		}
 		return nil, fmt.Errorf("%w: inventory access restricted or session invalid (rwgrsn: %d)", ErrSessionExpired, inventoryResp.Rwgrsn)
 	}
 
