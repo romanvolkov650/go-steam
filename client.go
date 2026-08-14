@@ -625,6 +625,9 @@ func (c *Client) LoginWithRefreshTokenWithContext(ctx context.Context) error {
 		c.mu.Lock()
 		c.LoggedIn = true
 		c.mu.Unlock()
+		if c.CookiesFilePath != "" {
+			_ = c.SaveCookiesToFile(c.CookiesFilePath)
+		}
 		return nil
 	}
 
@@ -800,7 +803,18 @@ func (c *Client) LoginWithContext(ctx context.Context) error {
 		c.SetSessionCookies(sessionID, jwtSteamLoginSecure, rToken)
 	}
 
+	if c.CookiesFilePath != "" {
+		_ = c.SaveCookiesToFile(c.CookiesFilePath)
+	}
+
 	return nil
+}
+
+// HasCredentials reports whether the client has sufficient credentials (password or refresh token) to attempt login.
+func (c *Client) HasCredentials() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Config.Password != "" || c.Config.RefreshToken != ""
 }
 
 // Logout terminates the current Steam session by calling /login/logout/.
