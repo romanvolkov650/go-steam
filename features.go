@@ -77,6 +77,40 @@ type AccountData struct {
 	Tags           map[int]string `json:"tags"`
 }
 
+// HasCS2Prime reports whether the account owns the Counter-Strike 2 Prime Status Upgrade package (SubID 54029).
+func (ad *AccountData) HasCS2Prime() bool {
+	if ad == nil {
+		return false
+	}
+	return ad.HasPackage(54029)
+}
+
+// HasApp reports whether the account owns the specified Steam AppID.
+func (ad *AccountData) HasApp(appID int) bool {
+	if ad == nil {
+		return false
+	}
+	for _, id := range ad.OwnedApps {
+		if id == appID {
+			return true
+		}
+	}
+	return false
+}
+
+// HasPackage reports whether the account owns the specified Steam PackageID (SubID).
+func (ad *AccountData) HasPackage(pkgID int) bool {
+	if ad == nil {
+		return false
+	}
+	for _, id := range ad.OwnedPackages {
+		if id == pkgID {
+			return true
+		}
+	}
+	return false
+}
+
 // Confirmation represents a pending 2FA Mobile Confirmation (trade / market listing).
 type Confirmation struct {
 	ID        string `json:"id"`
