@@ -39,3 +39,60 @@ func TestExtractWalletBalanceDetailsNoPending(t *testing.T) {
 		t.Errorf("Expected empty availability, got '%s'", avail)
 	}
 }
+
+func TestExtractWalletBalanceDetailsAccountRowZeroBalance(t *testing.T) {
+	htmlSnippet := `<div class="accountRow accountBalance">
+							<div class="accountData price">0 руб.</div>
+							<div class="accountLabel">Wallet Balance</div>
+						</div>`
+
+	bal, pendingBal, avail := extractWalletBalanceDetailsFromHTML(htmlSnippet)
+
+	if bal != "0 руб." {
+		t.Errorf("Expected balance '0 руб.', got '%s'", bal)
+	}
+	if pendingBal != "" {
+		t.Errorf("Expected empty pending balance, got '%s'", pendingBal)
+	}
+	if avail != "" {
+		t.Errorf("Expected empty availability, got '%s'", avail)
+	}
+}
+
+func TestExtractWalletBalanceDetailsAccountRowUSD(t *testing.T) {
+	htmlSnippet := `<div class="accountRow accountBalance">
+							<div class="accountData price">$0.00</div>
+							<div class="accountLabel">Wallet Balance</div>
+						</div>`
+
+	bal, pendingBal, avail := extractWalletBalanceDetailsFromHTML(htmlSnippet)
+
+	if bal != "$0.00" {
+		t.Errorf("Expected balance '$0.00', got '%s'", bal)
+	}
+	if pendingBal != "" {
+		t.Errorf("Expected empty pending balance, got '%s'", pendingBal)
+	}
+	if avail != "" {
+		t.Errorf("Expected empty availability, got '%s'", avail)
+	}
+}
+
+func TestExtractWalletBalanceDetailsAccountRowEUR(t *testing.T) {
+	htmlSnippet := `<div class="accountRow accountBalance">
+							<div class="accountData price">0,--€</div>
+							<div class="accountLabel">Wallet Balance</div>
+						</div>`
+
+	bal, pendingBal, avail := extractWalletBalanceDetailsFromHTML(htmlSnippet)
+
+	if bal != "0,--€" {
+		t.Errorf("Expected balance '0,--€', got '%s'", bal)
+	}
+	if pendingBal != "" {
+		t.Errorf("Expected empty pending balance, got '%s'", pendingBal)
+	}
+	if avail != "" {
+		t.Errorf("Expected empty availability, got '%s'", avail)
+	}
+}

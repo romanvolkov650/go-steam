@@ -17,8 +17,10 @@ import (
 var (
 	reBalDirect       = regexp.MustCompile(`(?i)"wallet_balance"\s*:\s*"?(\d+)"?`)
 	reCurrDirect      = regexp.MustCompile(`(?i)"wallet_currency"\s*:\s*(\d+)`)
-	reTag             = regexp.MustCompile(`(?i)(?:id="header_wallet_balance"|class="[^"]*account_balance[^"]*")[^>]*>([\s\S]*?)</`)
-	reHeaderWalletA   = regexp.MustCompile(`(?i)id="header_wallet_balance"[^>]*>([\s\S]*?)</a>`)
+	reTag               = regexp.MustCompile(`(?i)(?:id="header_wallet_balance"|class="[^"]*(?:account_balance|accountBalance)[^"]*")[^>]*>([\s\S]*?)</`)
+	reHeaderWalletA     = regexp.MustCompile(`(?i)id="header_wallet_balance"[^>]*>([\s\S]*?)</a>`)
+	reAccountRowBalance = regexp.MustCompile(`(?is)<div[^>]*class=["'][^"']*accountBalance[^"']*["'][^>]*>[\s\S]*?<div[^>]*class=["'][^"']*price[^"']*["'][^>]*>([\s\S]*?)</div>`)
+	reAccountDataPrice  = regexp.MustCompile(`(?is)<div[^>]*class=["'][^"']*accountData\s+price[^"']*["'][^>]*>([\s\S]*?)</div>`)
 	reSpanPending     = regexp.MustCompile(`(?i)<span[^>]*data-tooltip-html="([^"]+)"[^>]*>([\s\S]*?)</span>`)
 	rePendingAvail    = regexp.MustCompile(`(?i)\((available in [^)]+)\)`)
 	rePendingAvailAlt = regexp.MustCompile(`(?i)\(([^)]+)\)`)
@@ -185,7 +187,25 @@ func extractWalletBalanceDetailsFromHTML(bodyStr string) (balance, pendingBalanc
 		}
 	}
 
-	// Fallback 1: Direct Regex for "wallet_balance": 1456 / "wallet_balance": "1456"
+	// Fallback 1: Account page body <div class="accountRow accountBalance"> ... <div class="accountData price">0 руб.</div>
+	if m := reAccountRowBalance.FindStringSubmatch(bodyStr); len(m) > 1 {
+		cleanText := strings.TrimSpace(reStripHTML.ReplaceAllString(m[1], ""))
+		if cleanText != "" {
+			balance = cleanText
+			return balance, pendingBalance, pendingAvailability
+		}
+	}
+
+	// Fallback 2: <div class="accountData price">0 руб.</div>
+	if m := reAccountDataPrice.FindStringSubmatch(bodyStr); len(m) > 1 {
+		cleanText := strings.TrimSpace(reStripHTML.ReplaceAllString(m[1], ""))
+		if cleanText != "" {
+			balance = cleanText
+			return balance, pendingBalance, pendingAvailability
+		}
+	}
+
+	// Fallback 3: Direct Regex for "wallet_balance": 1456 / "wallet_balance": "1456"
 	if mBal := reBalDirect.FindStringSubmatch(bodyStr); len(mBal) > 1 {
 		rawAmount, err := strconv.ParseFloat(mBal[1], 64)
 		if err == nil {
@@ -204,7 +224,7 @@ func extractWalletBalanceDetailsFromHTML(bodyStr string) (balance, pendingBalanc
 		}
 	}
 
-	// Fallback 2: General tag regex for account_balance
+	// Fallback 4: General tag regex for account_balance / accountBalance
 	if m := reTag.FindStringSubmatch(bodyStr); len(m) > 1 {
 		cleanText := strings.TrimSpace(reStripHTML.ReplaceAllString(m[1], ""))
 		if cleanText != "" {
