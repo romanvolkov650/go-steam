@@ -94,6 +94,8 @@ type AccountService interface {
 	GetUserProfileWithContext(ctx context.Context) (*UserProfile, error)
 	FetchAccountDetails() (*FullAccountDetails, error)
 	FetchAccountDetailsWithContext(ctx context.Context) (*FullAccountDetails, error)
+	GetAccountData() (*AccountData, error)
+	GetAccountDataWithContext(ctx context.Context) (*AccountData, error)
 	ExportCookies() ([]*CookieJSON, error)
 	ExportCookiesJSON() (string, error)
 	ImportCookies(cookies []*CookieJSON)

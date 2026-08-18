@@ -68,6 +68,15 @@ type FullAccountDetails struct {
 	LastUpdated   int64  `json:"last_updated"`
 }
 
+// AccountData represents user store ownership and preferences from dynamicstore/userdata.
+type AccountData struct {
+	OwnedApps      []int          `json:"owned_apps"`
+	OwnedPackages  []int          `json:"owned_packages"`
+	WishlistedApps []int          `json:"wishlisted_apps"`
+	IgnoredApps    map[string]int `json:"ignored_apps"`
+	Tags           map[int]string `json:"tags"`
+}
+
 // Confirmation represents a pending 2FA Mobile Confirmation (trade / market listing).
 type Confirmation struct {
 	ID        string `json:"id"`
@@ -628,4 +637,76 @@ func (c *Client) FetchAccountDetailsWithContext(ctx context.Context) (*FullAccou
 	}
 
 	return details, nil
+}
+
+// GetAccountData fetches the account's store data (owned games/apps, packages, wishlist, ignored apps, tags).
+func (c *Client) GetAccountData() (*AccountData, error) {
+	return c.GetAccountDataWithContext(context.Background())
+}
+
+// GetAccountDataWithContext fetches the account's store data with context support.
+func (c *Client) GetAccountDataWithContext(ctx context.Context) (*AccountData, error) {
+	c.mu.RLock()
+	steamID := c.Config.SteamID
+	c.mu.RUnlock()
+
+	reqURL := "https://store.steampowered.com/dynamicstore/userdata/"
+	if steamID != "" {
+		accountID := SteamID64ToAccountID(steamID)
+		if accountID > 0 {
+			reqURL = fmt.Sprintf("https://store.steampowered.com/dynamicstore/userdata/?id=%d", accountID)
+		} else {
+			reqURL = fmt.Sprintf("https://store.steampowered.com/dynamicstore/userdata/?id=%s", steamID)
+		}
+	}
+
+	req, err := c.newRequestWithContext(ctx, "GET", reqURL, nil, "https://store.steampowered.com/")
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json, text/javascript, */*; q=0.01")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+
+	bodyBytes, _, err := c.doRequestAndRead(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw struct {
+		Wishlist        *[]int `json:"rgWishlist"`
+		OwnedPackages   *[]int `json:"rgOwnedPackages"`
+		OwnedApps       *[]int `json:"rgOwnedApps"`
+		RecommendedTags *[]struct {
+			TagID int    `json:"tagid"`
+			Name  string `json:"name"`
+		} `json:"rgRecommendedTags"`
+		IgnoredApps json.RawMessage `json:"rgIgnoredApps"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse userdata response: %w", err)
+	}
+
+	if raw.Wishlist == nil || raw.OwnedPackages == nil || raw.OwnedApps == nil || raw.RecommendedTags == nil || len(raw.IgnoredApps) == 0 || string(raw.IgnoredApps) == "null" {
+		return nil, fmt.Errorf("malformed dynamicstore response")
+	}
+
+	tags := make(map[int]string, len(*raw.RecommendedTags))
+	for _, tag := range *raw.RecommendedTags {
+		tags[tag.TagID] = tag.Name
+	}
+
+	ignoredApps := make(map[string]int)
+	trimmedIgnored := strings.TrimSpace(string(raw.IgnoredApps))
+	if trimmedIgnored != "" && trimmedIgnored != "[]" && trimmedIgnored != "{}" && trimmedIgnored != "null" {
+		_ = json.Unmarshal(raw.IgnoredApps, &ignoredApps)
+	}
+
+	return &AccountData{
+		OwnedApps:      *raw.OwnedApps,
+		OwnedPackages:  *raw.OwnedPackages,
+		WishlistedApps: *raw.Wishlist,
+		IgnoredApps:    ignoredApps,
+		Tags:           tags,
+	}, nil
 }
