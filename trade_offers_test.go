@@ -248,3 +248,115 @@ func TestGetUserInventoryWithContext_InvalidSession(t *testing.T) {
 		t.Fatalf("Expected ErrSessionExpired for response without total_inventory_count, got nil")
 	}
 }
+
+func TestHasTradeProtectionModal_Present(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(`<html><body><div id="trade_protection_modal" class="modal">Trade protection</div></body></html>`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{Username: "testuser", SteamID: "76561198000000000"})
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	client.SessionID = "test_session_id"
+	client.HTTPClient.Transport = &testTransport{serverURL: server.URL}
+
+	hasModal, err := client.HasTradeProtectionModal()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !hasModal {
+		t.Fatalf("Expected hasModal=true, got false")
+	}
+}
+
+func TestHasTradeProtectionModal_Absent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(`<html><body><div id="other_content">No modal here</div></body></html>`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{Username: "testuser", SteamID: "76561198000000000"})
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	client.SessionID = "test_session_id"
+	client.HTTPClient.Transport = &testTransport{serverURL: server.URL}
+
+	hasModal, err := client.HasTradeProtectionModal()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if hasModal {
+		t.Fatalf("Expected hasModal=false, got true")
+	}
+}
+
+func TestEnsureTradeProtectionAcknowledged_WhenPresent(t *testing.T) {
+	ackCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/trade/new/acknowledge" {
+			ackCalled = true
+			if r.Method != "POST" {
+				t.Errorf("Expected POST method, got %s", r.Method)
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(`<html><body><div id="trade_protection_modal">Warning</div></body></html>`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{Username: "testuser", SteamID: "76561198000000000"})
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	client.SessionID = "test_session_id"
+	client.HTTPClient.Transport = &testTransport{serverURL: server.URL}
+
+	hadModal, err := client.EnsureTradeProtectionAcknowledged()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !hadModal {
+		t.Fatalf("Expected hadModal=true, got false")
+	}
+	if !ackCalled {
+		t.Fatalf("Expected acknowledge POST to be called")
+	}
+}
+
+func TestEnsureTradeProtectionAcknowledged_WhenAbsent(t *testing.T) {
+	ackCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/trade/new/acknowledge" {
+			ackCalled = true
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(`<html><body><div>Clean page</div></body></html>`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{Username: "testuser", SteamID: "76561198000000000"})
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	client.SessionID = "test_session_id"
+	client.HTTPClient.Transport = &testTransport{serverURL: server.URL}
+
+	hadModal, err := client.EnsureTradeProtectionAcknowledged()
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if hadModal {
+		t.Fatalf("Expected hadModal=false, got true")
+	}
+	if ackCalled {
+		t.Fatalf("Acknowledge POST should NOT be called when modal is absent")
+	}
+}

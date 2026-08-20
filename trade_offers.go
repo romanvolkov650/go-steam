@@ -913,3 +913,65 @@ func (c *Client) AcknowledgeTradeWithContext(ctx context.Context) error {
 
 	return nil
 }
+
+// HasTradeProtectionModal checks if the account's trade offers page contains #trade_protection_modal.
+func (c *Client) HasTradeProtectionModal() (bool, error) {
+	return c.HasTradeProtectionModalWithContext(context.Background())
+}
+
+// HasTradeProtectionModalWithContext checks if the account's trade offers page contains #trade_protection_modal with context support.
+func (c *Client) HasTradeProtectionModalWithContext(ctx context.Context) (bool, error) {
+	c.mu.RLock()
+	steamID := c.Config.SteamID
+	c.mu.RUnlock()
+
+	if steamID == "" {
+		return false, fmt.Errorf("SteamID is required to check trade protection modal")
+	}
+
+	pageURL := fmt.Sprintf("https://steamcommunity.com/profiles/%s/tradeoffers/", steamID)
+	req, err := c.newRequestWithContext(ctx, "GET", pageURL, nil, "")
+	if err != nil {
+		return false, err
+	}
+
+	bodyBytes, resp, err := c.doRequestAndRead(ctx, req)
+	if err != nil {
+		return false, fmt.Errorf("failed to fetch trade offers page: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return false, &SteamAPIError{StatusCode: resp.StatusCode, Message: string(bodyBytes)}
+	}
+
+	bodyStr := string(bodyBytes)
+	hasModal := strings.Contains(bodyStr, "trade_protection_modal") || strings.Contains(bodyStr, `id="trade_protection_modal"`)
+	return hasModal, nil
+}
+
+// EnsureTradeProtectionAcknowledged checks if #trade_protection_modal is present on the trade offers page.
+// If present, it sends an acknowledgement POST request to https://steamcommunity.com/trade/new/acknowledge.
+// Returns hadModal=true if modal was detected and acknowledged, or hadModal=false if modal was already absent.
+func (c *Client) EnsureTradeProtectionAcknowledged() (bool, error) {
+	return c.EnsureTradeProtectionAcknowledgedWithContext(context.Background())
+}
+
+// EnsureTradeProtectionAcknowledgedWithContext checks if #trade_protection_modal is present on the trade offers page with context support.
+// If present, it sends an acknowledgement POST request to https://steamcommunity.com/trade/new/acknowledge.
+// Returns hadModal=true if modal was detected and acknowledged, or hadModal=false if modal was already absent.
+func (c *Client) EnsureTradeProtectionAcknowledgedWithContext(ctx context.Context) (bool, error) {
+	hasModal, err := c.HasTradeProtectionModalWithContext(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	if !hasModal {
+		return false, nil
+	}
+
+	if err := c.AcknowledgeTradeWithContext(ctx); err != nil {
+		return true, fmt.Errorf("failed to acknowledge trade protection modal: %w", err)
+	}
+
+	return true, nil
+}
